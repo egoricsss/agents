@@ -1,0 +1,56 @@
+[project]
+name = "lab-manager"
+version = "0.1.0"
+description = "Telegram-менеджер лабораторных работ: раскладывает задания по папкам и готовит промпты для исполнителя"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lab_manager"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "SIM",      # simplify
+    "ASYNC",    # async pitfalls
+    "ANN",      # type annotations everywhere
+    "S",        # bandit (security)
+    "RUF",
+]
+ignore = ["RUF001", "RUF002", "RUF003"]  # cyrillic in strings/comments is intended
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # assert is how pytest works
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers"
+markers = [
+    "live: тесты с реальными внешними API (запускаются вручную: pytest -m live)",
+]
