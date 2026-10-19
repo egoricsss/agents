@@ -7,4 +7,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
-data/
+# данные приложения (SQLite, файлы лаб) — только в корне проекта, не tests/data
+/data/
