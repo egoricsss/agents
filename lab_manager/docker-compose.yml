@@ -1,0 +1,41 @@
+# Запуск: docker compose up -d --build   (из папки проекта, rootless Docker)
+# Входящих портов нет: Telegram работает через polling.
+
+services:
+  lab_manager:
+    build: .
+    image: lab_manager:latest
+    container_name: lab_manager
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Пути внутри контейнера важнее значений из .env (там — пути хоста для локального запуска).
+      DATA_DIR: /data
+      GIGACHAT_CA_BUNDLE_FILE: /certs/russian_trusted_root_ca.pem
+    volumes:
+      - lab_data:/data
+      # Корневой сертификат Минцифры для TLS к GigaChat — только чтение.
+      - ${GIGACHAT_CA_HOST_FILE:-/home/agent/certs/Russian_Trusted_Root_CA.cer}:/certs/russian_trusted_root_ca.pem:ro
+    mem_limit: 640m
+    cpus: 0.75
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-m", "lab_manager", "health"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  lab_data:

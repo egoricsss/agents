@@ -35,6 +35,13 @@ class LabRemover:
         if lab.folder:
             path = self.storage.resolve(lab.folder)
             await asyncio.to_thread(shutil.rmtree, path, True)
+            parent = path.parent  # опустевшая папка предмета
+            if (
+                parent != self.storage.root.resolve()
+                and parent.is_dir()
+                and not any(parent.iterdir())
+            ):
+                parent.rmdir()
             if self.disk is not None:
                 try:
                     await self.disk.delete(join_path(self.disk_root, lab.folder), wait=False)

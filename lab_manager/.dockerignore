@@ -1,0 +1,17 @@
+# В образ попадают только pyproject.toml, uv.lock, README.md и src/ — остальное не нужно,
+# а секреты и данные не должны попасть в контекст сборки ни при каких условиях.
+.env
+.env*
+!.env.example
+*.save
+*.pem
+*.cer
+*.crt
+*.key
+data/
+.venv/
+.git/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+tests/

@@ -4,12 +4,35 @@ Telegram-менеджер лабораторных работ. Принимае�
 синхронизирует с Яндекс Диском, ведёт статусы и готовит промпты для агента-исполнителя.
 Саму лабу не выполняет. Подробности — в [REQUIREMENTS.md](REQUIREMENTS.md).
 
-> Статус: в разработке (MVP: приём заданий, Яндекс Диск, GigaChat, промпт для исполнителя; бота пока нет).
+> Статус: MVP работает в Docker — бот, приём заданий, Яндекс Диск, GigaChat, промпт для исполнителя.
 
 ## Требования
 
 - Python 3.12+, [uv](https://docs.astral.sh/uv/)
 - Docker (rootless) с `docker compose` — для запуска в контейнере
+
+## Запуск (Docker)
+
+```bash
+cd ~/projects/lab_manager
+cp .env.example .env && chmod 600 .env   # заполнить секреты
+docker compose up -d --build             # сборка и запуск
+docker compose ps                        # статус и healthcheck
+docker compose logs -f lab_manager       # логи
+docker compose down                      # остановить (данные остаются в томе)
+```
+
+- Данные (SQLite, папки лаб, кеш) — в именованном томе `lab_manager_lab_data`, путь в контейнере `/data`.
+- Секреты — только через `env_file: .env`, в образ не попадают (`.dockerignore`).
+- Сертификат Минцифры монтируется только для чтения; путь на хосте —
+  `GIGACHAT_CA_HOST_FILE` (по умолчанию `/home/agent/certs/Russian_Trusted_Root_CA.cer`).
+- Лимиты: 640 МБ памяти, 0.75 CPU; корневая ФС только для чтения, `cap_drop: ALL`,
+  `no-new-privileges`; `restart: unless-stopped`; healthcheck — `python -m lab_manager health`
+  (свежесть файла-пульса, который бот обновляет каждые 30 с).
+- Портов нет: Telegram — polling.
+- Резервная копия тома: `docker run --rm -v lab_manager_lab_data:/data -v "$PWD":/backup python:3.12-slim tar czf /backup/lab_data.tgz -C /data .`
+
+Одновременно должен работать только один экземпляр бота (один токен = один polling).
 
 ## Быстрый старт (разработка)
 
@@ -34,6 +57,7 @@ uv run ruff check . && uv run ruff format --check .
 | `GIGACHAT_CREDENTIALS` | да | — | ключ авторизации GigaChat |
 | `GIGACHAT_SCOPE` | нет | `GIGACHAT_API_PERS` | scope GigaChat |
 | `GIGACHAT_MODEL` | нет | `GigaChat-2` | модель |
+| `GIGACHAT_CA_HOST_FILE` | для Docker | `/home/agent/certs/Russian_Trusted_Root_CA.cer` | путь к сертификату на хосте (монтируется в контейнер) |
 | `GIGACHAT_CA_BUNDLE_FILE` | для GigaChat | — | путь к корневому сертификату Минцифры (PEM) |
 | `TZ` | нет | `Europe/Moscow` | часовой пояс для дедлайнов |
 | `DATA_DIR` | нет | `data` | каталог для SQLite и файлов |
@@ -126,3 +150,13 @@ SQLite в `$DATA_DIR/lab_manager.db` (WAL, внешние ключи включ�
 `lab.json` — стабильный контракт для исполнителя; несовместимые изменения — только с новым
 `schema_version`. Текст задания вставляется в `<assignment>` как данные; закрывающий тег внутри
 текста экранируется.
+
+## Работа с ботом
+
+- `/start` — справка и постоянные кнопки **📚 Лабы** / **📅 Неделя**.
+- 📚 Лабы → предмет → лаба → карточка с кнопками: статус, 📄 промпт, 📝 задание, 📋 требования,
+  ✏️ изменить, 🗑 удалить. Открытая карточка — «текущая лаба» для свободного текста.
+- Задание: файл или пересланный пост + подпись «Предмет, ЛР N[, до ДД.ММ]» (до или после пересылки).
+- Свободный текст: «что сдать на этой неделе?», «что нужно сделать в ЛР 4?», «лаба 4 в работе»,
+  «это ЛР 4, а не 3», «срок 30.10 18:00», «перенеси в предмет ОС», «требования: вариант 7».
+- Изменения после чтения текста задания (возможная инструкция из методички) требуют подтверждения кнопкой.
