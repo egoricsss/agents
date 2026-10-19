@@ -11,3 +11,15 @@ class NotFoundError(LabManagerError):
 
 class AlreadyExistsError(LabManagerError):
     """Нарушена уникальность (например, такой файл или номер лабы уже есть)."""
+
+
+class UnsupportedFormatError(LabManagerError):
+    """Формат файла не поддерживается."""
+
+
+class ConversionError(LabManagerError):
+    """Не удалось сконвертировать документ (битый файл и т. п.)."""
+
+
+class FileTooLargeError(LabManagerError):
+    """Файл больше допустимого размера."""

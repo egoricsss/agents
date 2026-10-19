@@ -56,6 +56,7 @@ class Lab(_Model):
     status: Status
     deadline: datetime | None
     summary: str
+    folder: str | None
     created_at: datetime
     updated_at: datetime
 

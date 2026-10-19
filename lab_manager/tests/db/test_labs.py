@@ -40,6 +40,17 @@ async def test_create_defaults(db: Database) -> None:
     assert lab.created_at == lab.updated_at
 
 
+async def test_folder_is_stored_and_optional(db: Database) -> None:
+    subject = await db.subjects.get_or_create("ОС")
+    with_folder = await db.labs.create(
+        subject_id=subject.id, number=7, title="x", source=Source.SYSTEM, folder="ОС/07 x"
+    )
+    without = await make_lab(db, number=8)
+
+    assert with_folder.folder == "ОС/07 x"
+    assert without.folder is None
+
+
 async def test_create_records_initial_status(db: Database) -> None:
     lab = await make_lab(db)
 

@@ -136,7 +136,9 @@ class SubjectRepo(_Repo):
         return [self._model(row) for row in rows]
 
 
-_LAB_COLUMNS = "id, subject_id, number, title, status, deadline, summary, created_at, updated_at"
+_LAB_COLUMNS = (
+    "id, subject_id, number, title, status, deadline, summary, folder, created_at, updated_at"
+)
 
 
 class LabRepo(_Repo):
@@ -170,6 +172,7 @@ class LabRepo(_Repo):
         source: Source,
         deadline: datetime | None = None,
         summary: str = "",
+        folder: str | None = None,
     ) -> Lab:
         if number < 1:
             raise ValueError("номер лабы должен быть >= 1")
@@ -178,9 +181,9 @@ class LabRepo(_Repo):
         async with self._db.transaction():
             with _integrity(f"лаба {number}"):
                 lab_id = await self._insert(
-                    "INSERT INTO labs (subject_id, number, title, deadline, summary,"
-                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    [subject_id, number, title, deadline_db, summary, now, now],
+                    "INSERT INTO labs (subject_id, number, title, deadline, summary, folder,"
+                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    [subject_id, number, title, deadline_db, summary, folder, now, now],
                 )
             await self._log_status(lab_id, None, Status.TODO, source, now)
         return await self._require(lab_id)
