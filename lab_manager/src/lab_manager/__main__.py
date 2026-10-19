@@ -115,15 +115,10 @@ async def run(settings: Settings) -> None:
             db=db,
             queries=queries,
             storage=storage,
-            requirements=requirements,
             tz=tz,
-            editor=LabEditor(
-                db=db,
-                storage=storage,
-                builder=builder,
-                disk=disk,
-                disk_root=settings.yandex_disk_root,
-            ),
+        )
+        editor = LabEditor(
+            db=db, storage=storage, builder=builder, disk=disk, disk_root=settings.yandex_disk_root
         )
         agent = LabAgent(
             db=db,
@@ -134,6 +129,7 @@ async def run(settings: Settings) -> None:
             tz=tz,
             disk_root=settings.yandex_disk_root,
             assistant=assistant,
+            editor=editor,
             remover=LabRemover(
                 db=db, storage=storage, disk=disk, disk_root=settings.yandex_disk_root
             ),

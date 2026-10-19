@@ -245,7 +245,7 @@ async def test_lab_card(env: Env) -> None:
     await env.say("/lab ОС 3")
 
     text = env.last()
-    assert "Процессы и потоки" in text and "Вариант 7" in text and "к выполнению" in text
+    assert "Процессы и потоки" in text and "Вариант 7" in text and "к выполнению" in text.lower()
 
 
 async def test_lab_not_found_and_ambiguous(env: Env) -> None:

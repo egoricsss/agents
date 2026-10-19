@@ -30,6 +30,7 @@ from lab_manager.bot import format as fmt
 from lab_manager.db import Database
 from lab_manager.domain import RequirementScope, Source, Status
 from lab_manager.errors import (
+    AlreadyExistsError,
     ConversionError,
     FileTooLargeError,
     NotFoundError,
@@ -37,6 +38,7 @@ from lab_manager.errors import (
 )
 from lab_manager.extraction import LabExtraction
 from lab_manager.gateway import Burst
+from lab_manager.services.editing import LabEditor
 from lab_manager.services.executor_prompt import PROMPT_FILE, ExecutorPromptBuilder
 from lab_manager.services.ingest import (
     ASSIGNMENT_MARKDOWN,
@@ -100,6 +102,7 @@ class LabAgent:
         max_file_bytes: int = MAX_FILE_BYTES,
         assistant: LabAssistant | None = None,
         remover: LabRemover | None = None,
+        editor: LabEditor | None = None,
     ) -> None:
         self.db = db
         self.ingest = ingest
@@ -111,6 +114,8 @@ class LabAgent:
         self.max_file_bytes = max_file_bytes
         self.assistant = assistant  # свободный текст → диалоговый агент
         self._proposals: dict[str, Proposal] = {}
+        self._batches: dict[str, list[str]] = {}  # «ничего не надо» убирает все кнопки ответа
+        self.editor = editor
         self._current: dict[int, int] = {}  # chat → открытая лаба (контекст для свободного текста)
         self.remover = remover
         self._pending: dict[str, PendingIngest] = {}
@@ -324,15 +329,20 @@ class LabAgent:
             await self._card_action(query, bot, chat_id, action, parts[2:])
             return
 
-        if action in {"ap", "rj"} and len(parts) == 3:
+        if action == "ap" and len(parts) == 3:
             proposal = self._proposals.pop(parts[2], None)
-            await self._drop_buttons(query)
             if proposal is None:
-                await bot.send_message(chat_id, "Предложение устарело.")
-            elif action == "rj" or self.assistant is None:
-                await bot.send_message(chat_id, "Не применяю.")
-            else:
-                await bot.send_message(chat_id, await self.assistant.apply(proposal))
+                await bot.send_message(chat_id, "⌛ Это предложение уже неактуально.")
+                return
+            await self._remove_button(query, f"{NAME}:ap:{parts[2]}")
+            log.info("proposal applied: %s on lab %s", proposal.kind, proposal.lab_id)
+            await self._apply(bot, chat_id, proposal)
+            return
+        if action == "rj" and len(parts) == 3:
+            for token in self._batches.pop(parts[2], []):
+                self._proposals.pop(token, None)
+            await self._drop_buttons(query)
+            await bot.send_message(chat_id, "👌 Хорошо, ничего не трогаю.")
             return
 
         if action in {"del", "keep"} and len(parts) == 3:
@@ -466,49 +476,101 @@ class LabAgent:
             log.exception("assistant failed")
             await bot.send_message(
                 chat_id,
-                "Не получилось ответить: языковая модель сейчас недоступна или ответила"
-                " некорректно. Команды работают: /list /week /lab /status /req",
+                "😔 Не получилось ответить: языковая модель сейчас недоступна или ответила"
+                " странно. Кнопки внизу и команды /list /week работают как обычно.",
             )
             return
         log.info(
-            "assistant answered: %d chars, %d status changes, %d proposals",
-            len(reply.text),
-            len(reply.status_changes),
-            len(reply.proposals),
+            "assistant answered: %d chars, %d proposals", len(reply.text), len(reply.proposals)
         )
         rows: list[list[InlineKeyboardButton]] = []
-        for lab_id, old, label in reply.status_changes:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"↩️ Отменить: {label}"[:60],
-                        callback_data=f"{NAME}:st:{lab_id}:{old.value}",
-                    )
-                ]
-            )
+        batch = secrets.token_urlsafe(6)
+        tokens = []
         for proposal in reply.proposals:
             token = secrets.token_urlsafe(6)
             self._proposals[token] = proposal
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"✅ {proposal.label}"[:60], callback_data=f"{NAME}:ap:{token}"
-                    ),
-                    InlineKeyboardButton(text="✖️ Нет", callback_data=f"{NAME}:rj:{token}"),
-                ]
-            )
+            tokens.append(token)
+            mark = "⚠️ " if proposal.from_document else ""
+            rows.append([_button(f"{mark}{proposal.label}", f"ap:{token}")])
+        if rows:
+            self._batches[batch] = tokens
+            rows.append([_button("✖️ Ничего не надо", f"rj:{batch}")])
         text_out = escape(reply.text) or "…"
-        if reply.proposals:
+        if rows:
+            text_out += "\n\n👇 <i>Без нажатия ничего не меняется.</i>"
+        if any(p.from_document for p in reply.proposals):
             text_out += (
-                "\n\n⚠️ Изменения ниже агент предложил после чтения текста задания. Это может быть"
-                " инструкция из методички, а не ваша просьба — <b>ничего не изменено</b>."
-                " Применяйте, только если просили сами."
+                "\n\n⚠️ Кнопки с ⚠️ появились после чтения текста задания — это может быть"
+                " инструкция из методички, а не ваша просьба. Нажимайте, только если согласны."
             )
         await bot.send_message(
             chat_id,
             text_out,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
         )
+
+    async def _apply(self, bot: Bot, chat_id: int, proposal: Proposal) -> None:
+        """Выполнить подтверждённое предложение агента — ровно то, что было на кнопке."""
+        try:
+            view = await self.queries.view(proposal.lab_id) if proposal.lab_id else None
+        except NotFoundError:
+            await bot.send_message(chat_id, "Лаба уже удалена 🤷")
+            return
+        if view is not None:
+            self._current[chat_id] = view.lab.id
+        params = proposal.params
+        if proposal.kind == "status" and view:
+            await self._set_status(bot, chat_id, view, Status(params["status"]), undo=True)
+        elif proposal.kind == "edit" and view:
+            if self.editor is None:
+                await bot.send_message(chat_id, "Правка не настроена.")
+                return
+            try:
+                result = await self.editor.edit(view.lab.id, **params)
+            except AlreadyExistsError:
+                await bot.send_message(chat_id, "🙅 Такая лаба (предмет + номер) уже есть.")
+                return
+            await bot.send_message(
+                chat_id,
+                f"✏️ <b>Готово!</b> {fmt.lab_header(result.subject, result.lab)}\n"
+                + "\n".join(f"• {escape(change)}" for change in result.changes),
+                reply_markup=_open_card(result.lab.id),
+            )
+        elif proposal.kind == "requirements":
+            update = await self.requirements.set(
+                RequirementScope(params["scope"]), params["text"], params["target_id"]
+            )
+            await bot.send_message(
+                chat_id,
+                f"📋 <b>Требования сохранены</b> (версия {update.requirement.version})\n"
+                f"{_quote_text(params['text'])}\n"
+                f"Промптов пересобрано: {len(update.rebuilt_lab_ids)}",
+            )
+        elif proposal.kind == "prompt" and view:
+            await self._send_prompt(bot, chat_id, view)
+        elif proposal.kind == "assignment" and view:
+            await self._send_assignment(bot, chat_id, view)
+        elif proposal.kind == "card" and view:
+            text, markup = await self._lab_view(view.lab.id)
+            await bot.send_message(chat_id, text, reply_markup=markup)
+        elif proposal.kind == "delete" and view:
+            await self._ask_delete(bot, chat_id, view)
+
+    async def _remove_button(self, query: CallbackQuery, data: str) -> None:
+        """Убрать из клавиатуры применённую кнопку; если остались только «ничего не надо» — всё."""
+        message = query.message
+        if not isinstance(message, Message) or message.reply_markup is None:
+            return
+        rows = [
+            [b for b in row if b.callback_data != data]
+            for row in message.reply_markup.inline_keyboard
+        ]
+        rows = [row for row in rows if row]
+        useful = [row for row in rows if not (row[0].callback_data or "").startswith(f"{NAME}:rj:")]
+        with contextlib.suppress(Exception):
+            await message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if useful else None
+            )
 
     async def cmd_delete(self, message: Message, command: CommandObject) -> None:
         view = await self._resolve_one(message, command.args, "delete")
@@ -630,29 +692,9 @@ class LabAgent:
             text, markup = await self._lab_view(lab.id)
             await _show(query, text, markup)
         elif action == "pf":
-            await self.builder.write(lab.id)
-            _, prompt, _ = await self.builder.build(lab.id)
-            await bot.send_document(
-                chat_id,
-                BufferedInputFile(prompt.encode("utf-8"), filename=PROMPT_FILE),
-                caption=f"Промпт для исполнителя: {fmt.lab_header(view.subject, lab)}",
-            )
+            await self._send_prompt(bot, chat_id, view)
         elif action == "tf":
-            text = (
-                self.builder.storage.read_text(f"{lab.folder}/{ASSIGNMENT_MARKDOWN}")
-                if lab.folder
-                else None
-            )
-            if not text:
-                await bot.send_message(
-                    chat_id, "Текст задания не извлечён (скан) — оригинал на Диске."
-                )
-                return
-            await bot.send_document(
-                chat_id,
-                BufferedInputFile(text.encode("utf-8"), filename="assignment.md"),
-                caption=f"Задание: {fmt.lab_header(view.subject, lab)}",
-            )
+            await self._send_assignment(bot, chat_id, view)
         elif action == "rq":
             current = await self.requirements.current(RequirementScope.LAB, lab.id)
             body = escape(current.text) if current and current.text else "пока нет"
@@ -671,29 +713,65 @@ class LabAgent:
                 "• «срок 30.10 18:00» или «убери срок»\n• «тема — RL-агент для торговли»",
             )
         elif action == "dl":
+            await self._ask_delete(bot, chat_id, view)
+
+    async def _send_prompt(self, bot: Bot, chat_id: int, view: LabView) -> None:
+        await self.builder.write(view.lab.id)
+        _, prompt, _ = await self.builder.build(view.lab.id)
+        await bot.send_document(
+            chat_id,
+            BufferedInputFile(prompt.encode("utf-8"), filename=PROMPT_FILE),
+            caption=f"📄 Промпт для исполнителя\n{fmt.lab_header(view.subject, view.lab)}\n"
+            "Отдайте его Claude или другому агенту целиком.",
+        )
+
+    async def _send_assignment(self, bot: Bot, chat_id: int, view: LabView) -> None:
+        lab = view.lab
+        text = (
+            self.builder.storage.read_text(f"{lab.folder}/{ASSIGNMENT_MARKDOWN}")
+            if lab.folder
+            else None
+        )
+        if not text:
             await bot.send_message(
-                chat_id,
-                f"Удалить {fmt.lab_header(view.subject, lab)}?\n"
-                "Удалятся запись, локальная папка и папка на Диске (вместе с отчётами).",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            _button("🗑 Удалить", f"del:{lab.id}"),
-                            _button("Оставить", f"keep:{lab.id}"),
-                        ]
-                    ]
-                ),
+                chat_id, "📄 Текст задания не извлёкся (скан) — оригинал на Диске."
             )
+            return
+        await bot.send_document(
+            chat_id,
+            BufferedInputFile(text.encode("utf-8"), filename="assignment.md"),
+            caption=f"📝 Задание\n{fmt.lab_header(view.subject, lab)}",
+        )
+
+    async def _ask_delete(self, bot: Bot, chat_id: int, view: LabView) -> None:
+        await bot.send_message(
+            chat_id,
+            f"🗑 Удалить {fmt.lab_header(view.subject, view.lab)}?\n"
+            "Удалятся запись, локальная папка и папка на Диске — вместе с отчётами.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        _button("🗑 Да, удалить", f"del:{view.lab.id}"),
+                        _button("Оставить", f"keep:{view.lab.id}"),
+                    ]
+                ]
+            ),
+        )
 
     # ------------------------------------------------------------------ помощники
 
-    async def _set_status(self, bot: Bot, chat_id: int, view: LabView, status: Status) -> None:
+    async def _set_status(
+        self, bot: Bot, chat_id: int, view: LabView, status: Status, *, undo: bool = False
+    ) -> None:
         old = view.lab.status
         lab = await self.queries.set_status(view.lab.id, status, Source.TELEGRAM)
+        markup = None
+        if undo and old is not status:
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[[_button("↩️ Вернуть как было", f"st:{lab.id}:{old.value}")]]
+            )
         await bot.send_message(
-            chat_id,
-            f"{fmt.lab_header(view.subject, lab)}\n"
-            f"{STATUS_TITLES[old]} → <b>{STATUS_TITLES[lab.status]}</b>",
+            chat_id, fmt.status_changed(view.subject, lab, old), reply_markup=markup
         )
 
     async def _resolve_one(
@@ -815,3 +893,13 @@ async def _show(query: CallbackQuery, text: str, markup: InlineKeyboardMarkup | 
             if "not modified" in str(exc):
                 return
         await message.answer(text, reply_markup=markup)
+
+
+def _open_card(lab_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[_button("📂 Открыть карточку", f"nv:l:{lab_id}")]]
+    )
+
+
+def _quote_text(text: str) -> str:
+    return f"<blockquote>{escape(text)}</blockquote>"
