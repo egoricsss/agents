@@ -1,0 +1,27 @@
+# Общие правила для всего монорепозитория (у проектов есть свои .gitignore).
+
+# Секреты: env-файлы и их бэкапы, кроме шаблонов
+.env
+.env*
+!.env.example
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+secrets/
+
+# Бэкапы и временные файлы редакторов (nano: *.save, vim: *.swp, emacs: *~)
+*.save
+*.swp
+*.swo
+*~
+\#*\#
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
