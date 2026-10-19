@@ -93,6 +93,24 @@ class IngestResult:
         return [item.lab for item in self.items]
 
 
+@dataclass(frozen=True, slots=True)
+class IngestPreview:
+    """Разбор без сохранения. `duplicate` — если такое содержимое уже обработано."""
+
+    duplicate: IngestResult | None = None
+    extractions: tuple[LabExtraction, ...] = ()
+    has_text: bool = True
+
+    @property
+    def missing(self) -> list[str]:
+        fields = {name for extraction in self.extractions for name in extraction.missing_fields}
+        return [name for name in REQUIRED_FIELDS if name in fields]
+
+    @property
+    def needs_confirmation(self) -> bool:
+        return any(extraction.confidence <= LOW_CONFIDENCE for extraction in self.extractions)
+
+
 class IngestService:
     def __init__(
         self,
@@ -122,6 +140,21 @@ class IngestService:
             source=source,
         )
 
+    async def preview(self, *, data: bytes, filename: str, prompt: str | None) -> "IngestPreview":
+        """Разобрать без сохранения: что будет создано/обновлено (для подтверждения кнопкой).
+
+        Повторный разбор того же содержимого берётся из кеша конвертера и LLM.
+        """
+        self._check(data, filename)
+        sha256 = hashlib.sha256(data).hexdigest()
+        if duplicate := await self._duplicate(sha256):
+            return IngestPreview(duplicate=duplicate)
+        document = await self.converter.convert(data, filename)
+        return IngestPreview(
+            extractions=await self._extract(document.markdown, prompt),
+            has_text=document.has_text,
+        )
+
     async def ingest(
         self,
         *,
@@ -130,37 +163,29 @@ class IngestService:
         prompt: str | None,
         mime_type: str | None = None,
         source: Source = Source.TELEGRAM,
+        extractions: Sequence[LabExtraction] | None = None,
     ) -> IngestResult:
-        """Одно сообщение → одна или несколько лаб: новые создаются, существующие обновляются."""
-        if len(data) > self.max_bytes:
-            raise FileTooLargeError(f"файл больше {self.max_bytes // (1024 * 1024)} МБ")
-        if not self.converter.supports(filename):
-            raise UnsupportedFormatError(f"формат файла {filename!r} не поддерживается")
+        """Одно сообщение → одна или несколько лаб: новые создаются, существующие обновляются.
 
+        `extractions` — уже подтверждённый владельцем разбор (из `preview`), повторно не извлекаем.
+        """
+        self._check(data, filename)
         sha256 = hashlib.sha256(data).hexdigest()
         if duplicate := await self._duplicate(sha256):
             return duplicate
 
         document = await self.converter.convert(data, filename)
-        today = self.db.clock().astimezone(self.tz).date()
-        known_subjects = [subject.name for subject in await self.db.subjects.list()]
-        extractions = tuple(
-            await self.extractor.extract_all(
-                markdown=document.markdown,
-                prompt=prompt,
-                today=today,
-                tz=self.tz,
-                known_subjects=known_subjects,
-            )
+        found = (
+            tuple(extractions) if extractions else await self._extract(document.markdown, prompt)
         )
-        if any(extraction.missing_fields for extraction in extractions):
-            return IngestResult(IngestOutcome.NEEDS_INFO, extractions=extractions)
+        if not found or any(extraction.missing_fields for extraction in found):
+            return IngestResult(IngestOutcome.NEEDS_INFO, extractions=found)
 
         items: list[IngestedLab] = []
         async with self.db.transaction():
             if duplicate := await self._duplicate(sha256):
                 return duplicate
-            for extraction in extractions:
+            for extraction in found:
                 items.append(
                     await self._store(
                         extraction,
@@ -179,7 +204,26 @@ class IngestService:
             if IngestOutcome.CREATED in outcomes
             else IngestOutcome.NEW_VERSION
         )
-        return IngestResult(outcome, tuple(items), extractions)
+        return IngestResult(outcome, tuple(items), found)
+
+    def _check(self, data: bytes, filename: str) -> None:
+        if len(data) > self.max_bytes:
+            raise FileTooLargeError(f"файл больше {self.max_bytes // (1024 * 1024)} МБ")
+        if not self.converter.supports(filename):
+            raise UnsupportedFormatError(f"формат файла {filename!r} не поддерживается")
+
+    async def _extract(self, markdown: str, prompt: str | None) -> tuple[LabExtraction, ...]:
+        today = self.db.clock().astimezone(self.tz).date()
+        known_subjects = [subject.name for subject in await self.db.subjects.list()]
+        return tuple(
+            await self.extractor.extract_all(
+                markdown=markdown,
+                prompt=prompt,
+                today=today,
+                tz=self.tz,
+                known_subjects=known_subjects,
+            )
+        )
 
     async def _store(
         self,

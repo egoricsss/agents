@@ -361,3 +361,38 @@ async def test_needs_info_when_any_lab_lacks_fields(service: IngestService, db: 
     assert result.outcome is IngestOutcome.NEEDS_INFO
     assert result.missing == ["subject"]
     assert await db.labs.list() == []
+
+
+async def test_preview_stores_nothing_and_ingest_uses_confirmed_extractions(
+    service: IngestService, extractor: CountingExtractor, db: Database
+) -> None:
+    preview = await service.preview(
+        data=ASSIGNMENT_TEXT.encode(), filename="task.txt", prompt="ОС, ЛР 4"
+    )
+
+    assert preview.duplicate is None
+    assert preview.needs_confirmation  # в тексте «Лабораторная работа №3», в подписи — 4
+    assert await db.labs.list() == []
+
+    calls = extractor.calls
+    result = await service.ingest(
+        data=ASSIGNMENT_TEXT.encode(),
+        filename="task.txt",
+        prompt="ОС, ЛР 4",
+        extractions=preview.extractions,
+    )
+
+    assert extractor.calls == calls  # повторно не извлекали
+    assert [lab.number for lab in result.labs] == [4]
+
+
+async def test_preview_reports_duplicate_and_missing(service: IngestService) -> None:
+    await ingest(service, ASSIGNMENT_TEXT.encode())
+
+    duplicate = await service.preview(data=ASSIGNMENT_TEXT.encode(), filename="t.txt", prompt=None)
+    missing = await service.preview(
+        data=b"some new text without labs", filename="t.txt", prompt=None
+    )
+
+    assert duplicate.duplicate is not None
+    assert missing.missing == ["subject", "number"]
