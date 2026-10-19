@@ -210,3 +210,12 @@ async def test_suspicious_ranges_are_not_expanded(bad_range: str) -> None:
     labs = await extract_all(f"ОС, {bad_range}")
 
     assert len(labs) == 2
+
+
+@pytest.mark.parametrize(
+    "text", ["Срок сдачи: 23.10.", "Сдать до 23.10. Удачи!", "Срок: 23.10.2026."]
+)
+async def test_date_at_end_of_sentence(text: str) -> None:
+    [lab] = await extract_all("ОС, ЛР 3", text)
+
+    assert lab.deadline is not None and lab.deadline.date() == date(2026, 10, 23)

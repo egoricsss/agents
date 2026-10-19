@@ -9,7 +9,7 @@ import contextlib
 import logging
 import secrets
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from html import escape
 from io import BytesIO
@@ -25,6 +25,7 @@ from aiogram.types import (
     Message,
 )
 
+from lab_manager.assistant import LabAssistant, Proposal
 from lab_manager.bot import format as fmt
 from lab_manager.db import Database
 from lab_manager.domain import RequirementScope, Source, Status
@@ -59,8 +60,6 @@ NAME = "lab"
 PENDING_TTL = 3600.0
 GLOBAL_REFS = {"все", "всё", "общие", "global", "*"}
 
-TextHandler = Callable[[Bot, Message, str], Awaitable[None]]
-
 
 @dataclass
 class PendingIngest:
@@ -94,7 +93,7 @@ class LabAgent:
         tz: ZoneInfo,
         disk_root: str = "app:/Лабы",
         max_file_bytes: int = MAX_FILE_BYTES,
-        on_text: TextHandler | None = None,
+        assistant: LabAssistant | None = None,
         remover: LabRemover | None = None,
     ) -> None:
         self.db = db
@@ -105,7 +104,8 @@ class LabAgent:
         self.tz = tz
         self.disk_root = disk_root
         self.max_file_bytes = max_file_bytes
-        self.on_text = on_text  # свободный текст → диалоговый агент (шаг 7b)
+        self.assistant = assistant  # свободный текст → диалоговый агент
+        self._proposals: dict[str, Proposal] = {}
         self.remover = remover
         self._pending: dict[str, PendingIngest] = {}
         self._questions: dict[tuple[int, int], str] = {}  # (chat, message_id) → token
@@ -181,8 +181,8 @@ class LabAgent:
                 bot, burst.chat_id, pending.data, pending.filename, pending.mime_type, prompt
             )
             return
-        if self.on_text:
-            await self.on_text(bot, own_texts[-1], prompt or "")
+        if self.assistant and prompt:
+            await self._converse(bot, burst.chat_id, prompt)
             return
         await bot.send_message(
             burst.chat_id,
@@ -303,6 +303,17 @@ class LabAgent:
             else:
                 await self._store(bot, pending, pending.extractions or ())
             await self._drop_buttons(query)
+            return
+
+        if action in {"ap", "rj"} and len(parts) == 3:
+            proposal = self._proposals.pop(parts[2], None)
+            await self._drop_buttons(query)
+            if proposal is None:
+                await bot.send_message(chat_id, "Предложение устарело.")
+            elif action == "rj" or self.assistant is None:
+                await bot.send_message(chat_id, "Не применяю.")
+            else:
+                await bot.send_message(chat_id, await self.assistant.apply(proposal))
             return
 
         if action in {"del", "keep"} and len(parts) == 3:
@@ -436,6 +447,60 @@ class LabAgent:
         await message.answer_document(
             BufferedInputFile(prompt.encode("utf-8"), filename=PROMPT_FILE),
             caption=f"Промпт для исполнителя: {fmt.lab_header(view.subject, view.lab)}",
+        )
+
+    async def _converse(self, bot: Bot, chat_id: int, text: str) -> None:
+        assert self.assistant is not None  # noqa: S101
+        with contextlib.suppress(Exception):
+            await bot.send_chat_action(chat_id, "typing")
+        try:
+            reply = await self.assistant.answer(chat_id, text)
+        except Exception:
+            log.exception("assistant failed")
+            await bot.send_message(
+                chat_id,
+                "Не получилось ответить: языковая модель сейчас недоступна или ответила"
+                " некорректно. Команды работают: /list /week /lab /status /req",
+            )
+            return
+        log.info(
+            "assistant answered: %d chars, %d status changes, %d proposals",
+            len(reply.text),
+            len(reply.status_changes),
+            len(reply.proposals),
+        )
+        rows: list[list[InlineKeyboardButton]] = []
+        for lab_id, old, label in reply.status_changes:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"↩️ Отменить: {label}"[:60],
+                        callback_data=f"{NAME}:st:{lab_id}:{old.value}",
+                    )
+                ]
+            )
+        for proposal in reply.proposals:
+            token = secrets.token_urlsafe(6)
+            self._proposals[token] = proposal
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"✅ {proposal.label}"[:60], callback_data=f"{NAME}:ap:{token}"
+                    ),
+                    InlineKeyboardButton(text="✖️ Нет", callback_data=f"{NAME}:rj:{token}"),
+                ]
+            )
+        text_out = escape(reply.text) or "…"
+        if reply.proposals:
+            text_out += (
+                "\n\n⚠️ Изменения ниже агент предложил после чтения текста задания. Это может быть"
+                " инструкция из методички, а не ваша просьба — <b>ничего не изменено</b>."
+                " Применяйте, только если просили сами."
+            )
+        await bot.send_message(
+            chat_id,
+            text_out,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
         )
 
     async def cmd_delete(self, message: Message, command: CommandObject) -> None:

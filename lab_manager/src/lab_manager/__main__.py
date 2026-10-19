@@ -3,6 +3,10 @@
 `python -m lab_manager` — бот и обработчик очереди; `python -m lab_manager health` — healthcheck.
 """
 
+import os
+
+os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")  # без рекламы внешней трассировки
+
 import asyncio
 import contextlib
 import logging
@@ -14,6 +18,7 @@ from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+from lab_manager.assistant import LabAssistant
 from lab_manager.bot import LabAgent
 from lab_manager.config import Settings
 from lab_manager.converter import DocumentConverter
@@ -21,7 +26,8 @@ from lab_manager.db import Database
 from lab_manager.disk import YandexDiskClient
 from lab_manager.extraction.llm import LLMExtractor
 from lab_manager.gateway import Gateway
-from lab_manager.llm.gigachat import GigaChatClient
+from lab_manager.llm.gigachat import ChatResult, GigaChatClient
+from lab_manager.llm.pydantic_adapter import gigachat_model
 from lab_manager.services.disk_sync import DiskSync
 from lab_manager.services.executor_prompt import ExecutorPromptBuilder
 from lab_manager.services.ingest import BUILD_PROMPT_JOB, IngestService
@@ -88,14 +94,38 @@ async def run(settings: Settings) -> None:
             db, {BUILD_PROMPT_JOB: builder.handle_job, sync.job_kind: sync.handle_job}
         )
 
+        queries = LabQueries(db, tz)
+        requirements = RequirementsService(db=db, builder=builder)
+
+        async def record_dialog_call(result: ChatResult | None, ms: int, error: str | None) -> None:
+            await db.llm.record_call(
+                purpose="dialog",
+                model=result.model if result else gigachat.model,
+                prompt_version="dialog/v1",
+                latency_ms=ms,
+                ok=error is None,
+                prompt_tokens=result.usage.prompt_tokens if result else 0,
+                completion_tokens=result.usage.completion_tokens if result else 0,
+                error=error,
+            )
+
+        assistant = LabAssistant(
+            gigachat_model(gigachat, on_call=record_dialog_call),
+            db=db,
+            queries=queries,
+            storage=storage,
+            requirements=requirements,
+            tz=tz,
+        )
         agent = LabAgent(
             db=db,
             ingest=ingest,
-            queries=LabQueries(db, tz),
-            requirements=RequirementsService(db=db, builder=builder),
+            queries=queries,
+            requirements=requirements,
             builder=builder,
             tz=tz,
             disk_root=settings.yandex_disk_root,
+            assistant=assistant,
             remover=LabRemover(
                 db=db, storage=storage, disk=disk, disk_root=settings.yandex_disk_root
             ),
