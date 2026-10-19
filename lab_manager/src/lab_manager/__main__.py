@@ -29,6 +29,7 @@ from lab_manager.gateway import Gateway
 from lab_manager.llm.gigachat import ChatResult, GigaChatClient
 from lab_manager.llm.pydantic_adapter import gigachat_model
 from lab_manager.services.disk_sync import DiskSync
+from lab_manager.services.editing import LabEditor
 from lab_manager.services.executor_prompt import ExecutorPromptBuilder
 from lab_manager.services.ingest import BUILD_PROMPT_JOB, IngestService
 from lab_manager.services.labs import LabQueries
@@ -116,6 +117,13 @@ async def run(settings: Settings) -> None:
             storage=storage,
             requirements=requirements,
             tz=tz,
+            editor=LabEditor(
+                db=db,
+                storage=storage,
+                builder=builder,
+                disk=disk,
+                disk_root=settings.yandex_disk_root,
+            ),
         )
         agent = LabAgent(
             db=db,

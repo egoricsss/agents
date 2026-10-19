@@ -60,6 +60,19 @@ class LabStorage:
         _atomic_write(path, text.encode("utf-8"))
         return relative
 
+    def move(self, old_folder: str, new_folder: str) -> None:
+        """Переименовать папку лабы (вместе с заданием и отчётами)."""
+        source, target = self.resolve(old_folder), self.resolve(new_folder)
+        if source == target or not source.exists():
+            return
+        if target.exists():
+            raise FileExistsError(f"папка уже существует: {new_folder}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
+        parent = source.parent  # убрать опустевшую папку предмета
+        if parent != self.root.resolve() and not any(parent.iterdir()):
+            parent.rmdir()
+
     def read_text(self, relative: str) -> str | None:
         path = self.resolve(relative)
         return path.read_text(encoding="utf-8") if path.is_file() else None

@@ -145,6 +145,21 @@ class YandexDiskClient:
         await self._send("PUT", href, content=data, auth=False, ok={201, 202})
         return UploadResult.UPLOADED
 
+    async def move(self, source: str, target: str) -> bool:
+        """Переместить папку/файл. False — если источника нет (нечего переносить)."""
+        if await self.get_meta(source) is None:
+            return False
+        await self.ensure_dir(parent_path(target))
+        response = await self._api(
+            "POST",
+            "/resources/move",
+            {"from": source, "path": target, "overwrite": "false"},
+            ok={201, 202},
+        )
+        if response.status_code == 202:
+            await self._wait_operation(response.json()["href"])
+        return True
+
     async def delete(self, path: str, *, wait: bool = True) -> None:
         """Удаляет навсегда. Папки Диск удаляет асинхронно (202): с `wait` ждём операцию."""
         response = await self._api(

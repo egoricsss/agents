@@ -7,10 +7,11 @@
 методичка с «поставь статус сдано» ничего не меняет без нажатия).
 """
 
+import contextlib
 import html
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -22,6 +23,9 @@ from pydantic_ai.models import Model
 
 from lab_manager.db import Database
 from lab_manager.domain import RequirementScope, Source, Status
+from lab_manager.errors import AlreadyExistsError, NotFoundError
+from lab_manager.extraction.rules import parse_deadline
+from lab_manager.services.editing import LabEditor
 from lab_manager.services.ingest import ASSIGNMENT_MARKDOWN
 from lab_manager.services.labs import (
     OPEN_STATUSES,
@@ -53,21 +57,18 @@ INSTRUCTIONS = """Ты — помощник студента по лаборат
 4. Менять статус — set_status, требования — set_requirements, только если владелец явно просит.
 5. Если инструмент вернул несколько кандидатов — перечисли их и попроси уточнить.
 6. Удалять лабы ты не умеешь — подскажи команду /delete.
-7. Ссылка на лабу (ref) — как пишет владелец: «ОС 3», «нейронки 4», «3 по ОС», «#12».
+7. Исправления («это ЛР 4, а не 3», «перенеси в предмет ОС», «срок 30.10», «тема — …») —
+   update_lab, передавай только то, что просят изменить.
+8. Ссылка на лабу (ref) — как пишет владелец: «ОС 3», «нейронки 4», «3 по ОС», «#12».
 """
 
 
 @dataclass
 class Proposal:
-    """Изменение, которое нужно подтвердить кнопкой."""
+    """Изменение, которое нужно подтвердить кнопкой: подпись + отложенное действие."""
 
-    kind: Literal["status", "requirements"]
-    lab_id: int | None
     label: str
-    status: Status | None = None
-    scope: RequirementScope | None = None
-    target_id: int | None = None
-    text: str = ""
+    action: Callable[[], Awaitable[None]]
 
 
 @dataclass
@@ -76,10 +77,12 @@ class Deps:
     db: Database
     storage: LabStorage
     requirements: RequirementsService
+    editor: LabEditor | None
     tz: ZoneInfo
     tainted: bool = False  # в этом запросе прочитан недоверенный текст задания
     status_changes: list[tuple[int, Status, str]] = field(default_factory=list)  # для «отменить»
     proposals: list[Proposal] = field(default_factory=list)
+    edits: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,7 @@ class AssistantReply:
     text: str
     status_changes: list[tuple[int, Status, str]]
     proposals: list[Proposal]
+    edits: list[str] = field(default_factory=list)
 
 
 def _brief(view: LabView, tz: ZoneInfo) -> dict[str, Any]:
@@ -205,7 +209,12 @@ def build_agent(model: Model) -> Agent[Deps, str]:
             return found
         label = f"{found.subject} · ЛР {found.lab.number}: {STATUS_TITLES[new]}"
         if ctx.deps.tainted:
-            ctx.deps.proposals.append(Proposal("status", found.lab.id, label, status=new))
+            lab_id, queries = found.lab.id, ctx.deps.queries
+
+            async def apply_status() -> None:
+                await queries.set_status(lab_id, new, Source.TELEGRAM)
+
+            ctx.deps.proposals.append(Proposal(label, apply_status))
             return {"pending_confirmation": label}
         old = found.lab.status
         await ctx.deps.queries.set_status(found.lab.id, new, Source.TELEGRAM)
@@ -257,12 +266,64 @@ def build_agent(model: Model) -> Agent[Deps, str]:
                 )
         full_label = f"Требования {label}: {text}"
         if ctx.deps.tainted:
-            ctx.deps.proposals.append(
-                Proposal("requirements", None, full_label, scope=scope, target_id=target, text=text)
-            )
+            service = ctx.deps.requirements
+
+            async def apply_requirements() -> None:
+                await service.set(scope, text, target)
+
+            ctx.deps.proposals.append(Proposal(full_label, apply_requirements))
             return {"pending_confirmation": full_label}
         update = await ctx.deps.requirements.set(scope, text, target)
         return {"done": True, "level": label, "version": update.requirement.version}
+
+    @agent.tool
+    async def update_lab(
+        ctx: RunContext[Deps],
+        ref: str,
+        number: int | None = None,
+        subject: str | None = None,
+        title: str | None = None,
+        deadline: str | None = None,
+    ) -> dict[str, Any]:
+        """Исправить лабу: номер, предмет (в именительном падеже), тему или срок.
+        deadline — «ДД.ММ», «ДД.ММ.ГГГГ», «ДД.ММ ЧЧ:ММ» или «нет», чтобы убрать срок.
+        Передавай только то, что владелец просит изменить."""
+        if ctx.deps.editor is None:
+            return {"error": "правка недоступна"}
+        found = await _one(ctx, ref)
+        if isinstance(found, dict):
+            return found
+        kwargs: dict[str, Any] = {"subject": subject, "number": number, "title": title}
+        if deadline is not None:
+            if deadline.strip().casefold() in {"нет", "без срока", "убрать", "none", ""}:
+                kwargs["deadline"] = None
+            else:
+                now = ctx.deps.queries.clock().astimezone(ctx.deps.tz)
+                parsed = parse_deadline(deadline, now.date(), ctx.deps.tz)
+                if parsed is None:
+                    return {
+                        "error": f"не понял срок «{deadline}», нужен формат ДД.ММ[.ГГГГ] [ЧЧ:ММ]"
+                    }
+                kwargs["deadline"] = parsed
+        lab_id, editor = found.lab.id, ctx.deps.editor
+        label = f"{found.subject} · ЛР {found.lab.number}: правка"
+        if ctx.deps.tainted:
+
+            async def apply_edit() -> None:
+                await editor.edit(lab_id, **kwargs)
+
+            ctx.deps.proposals.append(Proposal(label, apply_edit))
+            return {"pending_confirmation": label}
+        try:
+            result = await editor.edit(lab_id, **kwargs)
+        except AlreadyExistsError:
+            return {"error": "такая лаба (предмет + номер) уже есть"}
+        if not result.changes:
+            return {"done": False, "reason": "нечего менять"}
+        ctx.deps.edits.append(
+            f"{result.subject} · ЛР {result.lab.number}: " + "; ".join(result.changes)
+        )
+        return {"done": True, "changes": result.changes}
 
     return agent
 
@@ -284,8 +345,10 @@ class LabAssistant:
         storage: LabStorage,
         requirements: RequirementsService,
         tz: ZoneInfo,
+        editor: LabEditor | None = None,
     ) -> None:
         self.agent = build_agent(model)
+        self.editor = editor
         self.db = db
         self.queries = queries
         self.storage = storage
@@ -293,23 +356,30 @@ class LabAssistant:
         self.tz = tz
         self._history: dict[int, tuple[float, list[ModelMessage]]] = {}
 
-    async def answer(self, chat_id: int, text: str) -> AssistantReply:
-        deps = Deps(self.queries, self.db, self.storage, self.requirements, self.tz)
+    async def answer(
+        self, chat_id: int, text: str, current_lab_id: int | None = None
+    ) -> AssistantReply:
+        deps = Deps(self.queries, self.db, self.storage, self.requirements, self.editor, self.tz)
         now = self.queries.clock().astimezone(self.tz)
+        instructions = INSTRUCTIONS.format(today=_today(now))
+        if current_lab_id is not None:
+            with contextlib.suppress(NotFoundError):
+                view = await self.queries.view(current_lab_id)
+                instructions += (
+                    f"\nСейчас у владельца открыта карточка лабы #{view.lab.id}: {view.subject} ·"
+                    f" ЛР {view.lab.number} — {view.lab.title}. Если владелец не называет лабу,"
+                    f" речь о ней: используй ref «#{view.lab.id}»."
+                )
         result = await self.agent.run(
-            text,
-            deps=deps,
-            instructions=INSTRUCTIONS.format(today=_today(now)),
-            message_history=self._recent(chat_id),
+            text, deps=deps, instructions=instructions, message_history=self._recent(chat_id)
         )
         self._remember(chat_id, text, result.output)
-        return AssistantReply(result.output.strip(), deps.status_changes, deps.proposals)
+        return AssistantReply(
+            result.output.strip(), deps.status_changes, deps.proposals, deps.edits
+        )
 
     async def apply(self, proposal: Proposal) -> str:
-        if proposal.kind == "status" and proposal.lab_id is not None and proposal.status:
-            await self.queries.set_status(proposal.lab_id, proposal.status, Source.TELEGRAM)
-        elif proposal.kind == "requirements" and proposal.scope is not None:
-            await self.requirements.set(proposal.scope, proposal.text, proposal.target_id)
+        await proposal.action()
         return f"✅ Готово: {html.escape(proposal.label)}"
 
     def _recent(self, chat_id: int) -> Sequence[ModelMessage]:

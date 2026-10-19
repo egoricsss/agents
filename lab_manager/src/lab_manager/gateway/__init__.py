@@ -20,7 +20,14 @@ from typing import Any, Protocol
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BotCommand, Message, TelegramObject, User
+from aiogram.types import (
+    BotCommand,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    TelegramObject,
+    User,
+)
 
 log = logging.getLogger(__name__)
 
@@ -154,8 +161,28 @@ class Gateway:
     async def drain(self) -> None:
         await self.collector.drain()
 
+    def _menu_keyboard(self) -> ReplyKeyboardMarkup | None:
+        """Постоянные кнопки внизу экрана: агенты могут предложить свои через `menu()`."""
+        buttons = [
+            label
+            for agent in self.agents.values()
+            for label in (getattr(agent, "menu", lambda: [])() or [])
+        ]
+        if not buttons:
+            return None
+        rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+        return ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text=label) for label in row] for row in rows],
+            resize_keyboard=True,
+            is_persistent=True,
+        )
+
     def _help_text(self) -> str:
-        lines = ["<b>Личный бот-фронтенд для агентов.</b>", ""]
+        lines = [
+            "<b>Личный бот-фронтенд для агентов.</b>",
+            "Кнопки внизу экрана — быстрая навигация; можно просто писать текстом.",
+            "",
+        ]
         for agent in self.agents.values():
             lines.append(f"<b>{html.escape(agent.title)}</b> (<code>{agent.name}</code>)")
             lines.append(html.escape(agent.description))
@@ -171,7 +198,7 @@ class Gateway:
         @router.message(CommandStart())
         @router.message(Command("help"))
         async def start(message: Message) -> None:
-            await message.answer(self._help_text())
+            await message.answer(self._help_text(), reply_markup=self._menu_keyboard())
 
         @router.message(Command("agent"))
         async def switch(message: Message, command: CommandObject) -> None:

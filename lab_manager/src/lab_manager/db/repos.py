@@ -226,8 +226,19 @@ class LabRepo(_Repo):
         deadline: datetime | None = _UNSET,
         summary: str = _UNSET,
         artifacts: Sequence[str] = _UNSET,
+        subject_id: int = _UNSET,
+        number: int = _UNSET,
+        folder: str = _UNSET,
     ) -> Lab:
         changes: dict[str, Any] = {}
+        if number is not _UNSET:
+            if number < 1:
+                raise ValueError("номер лабы должен быть >= 1")
+            changes["number"] = number
+        if subject_id is not _UNSET:
+            changes["subject_id"] = subject_id
+        if folder is not _UNSET:
+            changes["folder"] = folder
         if title is not _UNSET:
             changes["title"] = title
         if deadline is not _UNSET:
@@ -241,10 +252,11 @@ class LabRepo(_Repo):
             if changes:
                 changes["updated_at"] = self._now()
                 assignments = ", ".join(f"{column} = ?" for column in changes)
-                await self._conn.execute(
-                    f"UPDATE labs SET {assignments} WHERE id = ?",  # noqa: S608 — колонки фиксированы
-                    [*changes.values(), lab_id],
-                )
+                with _integrity(f"лаба {lab_id}"):
+                    await self._conn.execute(
+                        f"UPDATE labs SET {assignments} WHERE id = ?",  # noqa: S608 — колонки фиксированы
+                        [*changes.values(), lab_id],
+                    )
         return await self._require(lab_id)
 
     async def set_status(self, lab_id: int, status: Status, source: Source) -> Lab:
@@ -398,6 +410,18 @@ class FileRepo(_Repo):
             [lab_id],
         )
         return self._model(row) if row else None
+
+    async def relocate(self, lab_id: int, old_folder: str, new_folder: str) -> None:
+        """Папка лабы переименована: переписываем локальные пути, отметку о выгрузке сбрасываем."""
+        async with self._db.transaction():
+            for record in await self.list_for_lab(lab_id):
+                if record.local_path.startswith(f"{old_folder}/"):
+                    new_path = new_folder + record.local_path[len(old_folder) :]
+                    await self._conn.execute(
+                        "UPDATE files SET local_path = ?, disk_path = NULL, uploaded_at = NULL"
+                        " WHERE id = ?",
+                        [new_path, record.id],
+                    )
 
     async def mark_uploaded(self, file_id: int, disk_path: str) -> FileRecord:
         async with self._db.transaction():

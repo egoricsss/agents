@@ -39,12 +39,15 @@ from lab_manager.extraction import LabExtraction
 from lab_manager.gateway import Burst
 from lab_manager.services.executor_prompt import PROMPT_FILE, ExecutorPromptBuilder
 from lab_manager.services.ingest import (
+    ASSIGNMENT_MARKDOWN,
     MAX_FILE_BYTES,
     TEXT_MESSAGE_FILENAME,
     IngestOutcome,
     IngestService,
 )
 from lab_manager.services.labs import (
+    OPEN_STATUSES,
+    STATUS_ICONS,
     STATUS_TITLES,
     LabQueries,
     LabView,
@@ -57,6 +60,8 @@ from lab_manager.services.requirements import RequirementsService
 log = logging.getLogger(__name__)
 
 NAME = "lab"
+MENU_LABS = "📚 Лабы"
+MENU_WEEK = "📅 Неделя"
 PENDING_TTL = 3600.0
 GLOBAL_REFS = {"все", "всё", "общие", "global", "*"}
 
@@ -106,10 +111,15 @@ class LabAgent:
         self.max_file_bytes = max_file_bytes
         self.assistant = assistant  # свободный текст → диалоговый агент
         self._proposals: dict[str, Proposal] = {}
+        self._current: dict[int, int] = {}  # chat → открытая лаба (контекст для свободного текста)
         self.remover = remover
         self._pending: dict[str, PendingIngest] = {}
         self._questions: dict[tuple[int, int], str] = {}  # (chat, message_id) → token
         self._last_question: dict[int, str] = {}  # chat → token
+
+    def menu(self) -> list[str]:
+        """Постоянные кнопки внизу экрана (шлюз показывает их по /start)."""
+        return [MENU_LABS, MENU_WEEK]
 
     def commands(self) -> list[tuple[str, str]]:
         return [
@@ -133,6 +143,8 @@ class LabAgent:
         router.message.register(self.cmd_req, Command("req"))
         router.message.register(self.cmd_prompt, Command("prompt"))
         router.message.register(self.cmd_delete, Command("delete"))
+        router.message.register(self.cmd_list, F.text == MENU_LABS)
+        router.message.register(self.cmd_week, F.text == MENU_WEEK)
         router.callback_query.register(self.on_callback, F.data.startswith(f"{NAME}:"))
         return router
 
@@ -305,6 +317,13 @@ class LabAgent:
             await self._drop_buttons(query)
             return
 
+        if action == "nv":
+            await self._navigate(query, chat_id, parts[2:])
+            return
+        if action in {"ss", "pf", "tf", "rq", "ed", "dl"} and len(parts) >= 3:
+            await self._card_action(query, bot, chat_id, action, parts[2:])
+            return
+
         if action in {"ap", "rj"} and len(parts) == 3:
             proposal = self._proposals.pop(parts[2], None)
             await self._drop_buttons(query)
@@ -356,33 +375,21 @@ class LabAgent:
     # ------------------------------------------------------------------ команды
 
     async def cmd_list(self, message: Message) -> None:
-        views = await self.queries.open_labs()
-        total = len(await self.queries.all_labs())
-        empty = (
-            "Открытых лаб нет 🎉"
-            if total
-            else "Пока нет ни одной лабы. Пришлите файл задания или перешлите пост"
-            f" с подписью {fmt.PROMPT_EXAMPLE}."
-        )
-        await message.answer(fmt.lab_list(views, self.tz, empty=empty))
+        log.info("command list")
+        text, markup = await self._root_view()
+        await message.answer(text, reply_markup=markup)
 
     async def cmd_week(self, message: Message) -> None:
         await message.answer(fmt.week(await self.queries.week(), self.tz))
 
     async def cmd_lab(self, message: Message, command: CommandObject) -> None:
+        log.info("command lab")
         view = await self._resolve_one(message, command.args, "lab")
         if view is None:
             return
-        lab = view.lab
-        requirements = [
-            ("к лабе", await self.db.requirements.current(RequirementScope.LAB, lab.id)),
-            (
-                "к предмету",
-                await self.db.requirements.current(RequirementScope.SUBJECT, lab.subject_id),
-            ),
-            ("общие", await self.db.requirements.current(RequirementScope.GLOBAL)),
-        ]
-        await message.answer(fmt.lab_card(view, self.tz, self.disk_root, requirements))
+        self._current[message.chat.id] = view.lab.id
+        text, markup = await self._lab_view(view.lab.id)
+        await message.answer(text, reply_markup=markup)
 
     async def cmd_status(self, message: Message, command: CommandObject) -> None:
         args = (command.args or "").strip()
@@ -454,7 +461,7 @@ class LabAgent:
         with contextlib.suppress(Exception):
             await bot.send_chat_action(chat_id, "typing")
         try:
-            reply = await self.assistant.answer(chat_id, text)
+            reply = await self.assistant.answer(chat_id, text, self._current.get(chat_id))
         except Exception:
             log.exception("assistant failed")
             await bot.send_message(
@@ -523,6 +530,160 @@ class LabAgent:
                 ]
             ),
         )
+
+    # ------------------------------------------------------------------ навигация
+
+    async def _root_view(self) -> tuple[str, InlineKeyboardMarkup | None]:
+        views = await self.queries.all_labs()
+        if not views:
+            return (
+                "Пока нет ни одной лабы. Пришлите файл задания или перешлите пост"
+                f" с подписью {fmt.PROMPT_EXAMPLE}.",
+                None,
+            )
+        open_views = [v for v in views if v.lab.status in OPEN_STATUSES]
+        text = "📚 <b>Лабы</b> — выберите предмет\n\n" + fmt.lab_list(
+            open_views, self.tz, empty="Открытых лаб нет 🎉"
+        )
+        by_subject: dict[int, list[LabView]] = {}
+        for view in views:
+            by_subject.setdefault(view.lab.subject_id, []).append(view)
+        rows = []
+        for subject_id, items in sorted(
+            by_subject.items(), key=lambda kv: kv[1][0].subject.casefold()
+        ):
+            opened = sum(1 for v in items if v.lab.status in OPEN_STATUSES)
+            rows.append(
+                [_button(f"{items[0].subject} · {opened}/{len(items)}", f"nv:s:{subject_id}")]
+            )
+        rows.append([_button(MENU_WEEK, "nv:w")])
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _subject_view(self, subject_id: int) -> tuple[str, InlineKeyboardMarkup]:
+        views = [v for v in await self.queries.all_labs() if v.lab.subject_id == subject_id]
+        views.sort(key=lambda v: v.lab.number)
+        name = views[0].subject if views else "Предмет"
+        rows = [[_button(_lab_button_text(v, self.tz), f"nv:l:{v.lab.id}")] for v in views]
+        rows.append([_button("⬅️ Все предметы", "nv:r")])
+        text = f"<b>{escape(name)}</b> — выберите лабу" if views else "В этом предмете лаб нет."
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _lab_view(self, lab_id: int) -> tuple[str, InlineKeyboardMarkup]:
+        view = await self.queries.view(lab_id)
+        lab = view.lab
+        requirements = [
+            ("к лабе", await self.db.requirements.current(RequirementScope.LAB, lab.id)),
+            (
+                "к предмету",
+                await self.db.requirements.current(RequirementScope.SUBJECT, lab.subject_id),
+            ),
+            ("общие", await self.db.requirements.current(RequirementScope.GLOBAL)),
+        ]
+        text = fmt.lab_card(view, self.tz, self.disk_root, requirements)
+        text += "\n\n✏️ Чтобы поправить, просто напишите: «срок 30.10», «это ЛР 4», «тема — …»."
+        statuses = [s for s in CARD_STATUSES if s is not lab.status]
+        rows = [
+            [
+                _button(f"{STATUS_ICONS[s]} {STATUS_TITLES[s]}", f"ss:{lab.id}:{s.value}")
+                for s in statuses
+            ],
+            [
+                _button("📄 Промпт", f"pf:{lab.id}"),
+                _button("📝 Задание", f"tf:{lab.id}"),
+                _button("📋 Требования", f"rq:{lab.id}"),
+            ],
+            [_button("✏️ Изменить", f"ed:{lab.id}"), _button("🗑 Удалить", f"dl:{lab.id}")],
+            [_button("⬅️ К предмету", f"nv:s:{lab.subject_id}"), _button("📚 Все", "nv:r")],
+        ]
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _navigate(self, query: CallbackQuery, chat_id: int, target: list[str]) -> None:
+        try:
+            if target[:1] == ["s"] and len(target) == 2:
+                text, markup = await self._subject_view(int(target[1]))
+            elif target[:1] == ["l"] and len(target) == 2:
+                self._current[chat_id] = int(target[1])
+                text, markup = await self._lab_view(int(target[1]))
+            elif target[:1] == ["w"]:
+                text = fmt.week(await self.queries.week(), self.tz)
+                markup = InlineKeyboardMarkup(inline_keyboard=[[_button("⬅️ Все предметы", "nv:r")]])
+            else:
+                text, markup = await self._root_view()  # type: ignore[assignment]
+        except (ValueError, NotFoundError):
+            text, markup = await self._root_view()  # type: ignore[assignment]
+        await _show(query, text, markup)
+
+    async def _card_action(
+        self, query: CallbackQuery, bot: Bot, chat_id: int, action: str, args: list[str]
+    ) -> None:
+        try:
+            view = await self.queries.view(int(args[0]))
+        except (ValueError, NotFoundError):
+            await bot.send_message(chat_id, "Лаба не найдена — возможно, удалена. /list")
+            return
+        lab = view.lab
+        self._current[chat_id] = lab.id
+        log.info("card action %s on lab %s", action, lab.id)
+        if action == "ss" and len(args) == 2:
+            with contextlib.suppress(ValueError):
+                await self.queries.set_status(lab.id, Status(args[1]), Source.TELEGRAM)
+            text, markup = await self._lab_view(lab.id)
+            await _show(query, text, markup)
+        elif action == "pf":
+            await self.builder.write(lab.id)
+            _, prompt, _ = await self.builder.build(lab.id)
+            await bot.send_document(
+                chat_id,
+                BufferedInputFile(prompt.encode("utf-8"), filename=PROMPT_FILE),
+                caption=f"Промпт для исполнителя: {fmt.lab_header(view.subject, lab)}",
+            )
+        elif action == "tf":
+            text = (
+                self.builder.storage.read_text(f"{lab.folder}/{ASSIGNMENT_MARKDOWN}")
+                if lab.folder
+                else None
+            )
+            if not text:
+                await bot.send_message(
+                    chat_id, "Текст задания не извлечён (скан) — оригинал на Диске."
+                )
+                return
+            await bot.send_document(
+                chat_id,
+                BufferedInputFile(text.encode("utf-8"), filename="assignment.md"),
+                caption=f"Задание: {fmt.lab_header(view.subject, lab)}",
+            )
+        elif action == "rq":
+            current = await self.requirements.current(RequirementScope.LAB, lab.id)
+            body = escape(current.text) if current and current.text else "пока нет"
+            await bot.send_message(
+                chat_id,
+                f"📋 <b>Требования к {escape(view.subject)} · ЛР {lab.number}:</b>\n{body}\n\n"
+                "Чтобы задать или заменить — напишите, например:"
+                " «требования: вариант 7, код на C11».",
+            )
+        elif action == "ed":
+            await bot.send_message(
+                chat_id,
+                f"✏️ Правим {fmt.lab_header(view.subject, lab)}.\n"
+                "Напишите, что изменить, например:\n"
+                "• «это ЛР 4, а не 3»\n• «перенеси в предмет Нейронные сети»\n"
+                "• «срок 30.10 18:00» или «убери срок»\n• «тема — RL-агент для торговли»",
+            )
+        elif action == "dl":
+            await bot.send_message(
+                chat_id,
+                f"Удалить {fmt.lab_header(view.subject, lab)}?\n"
+                "Удалятся запись, локальная папка и папка на Диске (вместе с отчётами).",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            _button("🗑 Удалить", f"del:{lab.id}"),
+                            _button("Оставить", f"keep:{lab.id}"),
+                        ]
+                    ]
+                ),
+            )
 
     # ------------------------------------------------------------------ помощники
 
@@ -628,3 +789,29 @@ def _status_keyboard(lab_id: int) -> InlineKeyboardMarkup:
         for status, title in STATUS_TITLES.items()
     ]
     return InlineKeyboardMarkup(inline_keyboard=[buttons[:3], buttons[3:]])
+
+
+CARD_STATUSES = (Status.TODO, Status.IN_PROGRESS, Status.DONE, Status.SUBMITTED, Status.DEFENDED)
+
+
+def _button(text: str, data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text[:64], callback_data=f"{NAME}:{data}")
+
+
+def _lab_button_text(view: LabView, tz: ZoneInfo) -> str:
+    lab = view.lab
+    due = f" · {fmt.deadline(lab.deadline, tz, short=True)}" if lab.deadline else ""
+    return f"{STATUS_ICONS[lab.status]} ЛР {lab.number} · {lab.title[:30]}{due}"
+
+
+async def _show(query: CallbackQuery, text: str, markup: InlineKeyboardMarkup | None) -> None:
+    """Навигация — в том же сообщении; если отредактировать нельзя, присылаем новое."""
+    message = query.message
+    if isinstance(message, Message):
+        try:
+            await message.edit_text(text, reply_markup=markup)
+            return
+        except Exception as exc:  # «message is not modified» и т. п.
+            if "not modified" in str(exc):
+                return
+        await message.answer(text, reply_markup=markup)
