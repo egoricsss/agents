@@ -17,6 +17,7 @@ from lab_manager.errors import FileTooLargeError, UnsupportedFormatError
 from lab_manager.extraction import LabExtraction, LabExtractor
 from lab_manager.storage import ASSIGNMENT_DIR, LabStorage
 
+DISK_SYNC_JOB = "disk_sync"
 MAX_FILE_BYTES = 20 * 1024 * 1024  # лимит Bot API на скачивание файла
 ASSIGNMENT_MARKDOWN = f"{ASSIGNMENT_DIR}/assignment.md"
 TEXT_MESSAGE_FILENAME = "задание.md"
@@ -138,6 +139,12 @@ class IngestService:
                 local_path=local_path,
             )
             self.storage.write_text(folder, ASSIGNMENT_MARKDOWN, document.markdown)
+            # Transactional outbox: задача на выгрузку появляется только вместе с файлом.
+            await self.db.jobs.enqueue(
+                DISK_SYNC_JOB,
+                {"lab_id": lab.id},
+                idempotency_key=f"{DISK_SYNC_JOB}:file:{record.id}",
+            )
 
         return IngestResult(outcome, lab, subject, record, extraction, warnings)
 

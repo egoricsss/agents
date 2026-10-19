@@ -204,3 +204,33 @@ async def test_concurrent_duplicates_create_once(service: IngestService, db: Dat
         IngestOutcome.DUPLICATE,
     ]
     assert len(await db.labs.list()) == 1
+
+
+async def test_ingest_enqueues_disk_sync_job(service: IngestService, db: Database) -> None:
+    result = await ingest(service, ASSIGNMENT_TEXT.encode())
+    await ingest(service, ASSIGNMENT_TEXT.encode())  # дубликат не ставит задачу повторно
+
+    job = await db.jobs.claim_next(kinds=["disk_sync"])
+    assert job is not None and result.lab is not None
+    assert job.payload == {"lab_id": result.lab.id}
+    assert await db.jobs.claim_next(kinds=["disk_sync"]) is None
+
+
+async def test_needs_info_enqueues_nothing(service: IngestService, db: Database) -> None:
+    await ingest(service, ASSIGNMENT_TEXT.encode(), prompt=None)
+
+    assert await db.jobs.claim_next() is None
+
+
+async def test_failed_ingest_enqueues_nothing(
+    service: IngestService, storage: LabStorage, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args: object, **kwargs: object) -> str:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(storage, "write_text", broken)
+
+    with pytest.raises(OSError, match="disk full"):
+        await ingest(service, ASSIGNMENT_TEXT.encode())
+
+    assert await db.jobs.claim_next() is None
