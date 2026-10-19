@@ -26,6 +26,7 @@ from lab_manager.services.disk_sync import DiskSync
 from lab_manager.services.executor_prompt import ExecutorPromptBuilder
 from lab_manager.services.ingest import BUILD_PROMPT_JOB, IngestService
 from lab_manager.services.labs import LabQueries
+from lab_manager.services.removal import LabRemover
 from lab_manager.services.requirements import RequirementsService
 from lab_manager.storage import LabStorage
 from lab_manager.worker import JobWorker
@@ -95,6 +96,9 @@ async def run(settings: Settings) -> None:
             builder=builder,
             tz=tz,
             disk_root=settings.yandex_disk_root,
+            remover=LabRemover(
+                db=db, storage=storage, disk=disk, disk_root=settings.yandex_disk_root
+            ),
         )
         gateway = Gateway([agent], owner_id=settings.telegram_owner_id)
         bot = Bot(

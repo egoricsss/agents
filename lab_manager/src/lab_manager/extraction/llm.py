@@ -41,7 +41,7 @@ from lab_manager.prompts import escape_closing_tag
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = "extract_lab/v6"
+PROMPT_VERSION = "extract_lab/v7"
 PURPOSE = "extract_lab"
 FUNCTION_NAME = "save_labs"
 MAX_LABS = 10
@@ -200,6 +200,8 @@ class LLMExtractor:
             lab = self._merge_one(
                 number,
                 fields,
+                prompt=prompt,
+                markdown=markdown,
                 from_prompt=from_prompt,
                 from_doc=from_doc if single else {},
                 today=today,
@@ -218,6 +220,8 @@ class LLMExtractor:
         number: int | None,
         fields: LLMLabFields | None,
         *,
+        prompt: str | None,
+        markdown: str,
         from_prompt: dict[str, Any],
         from_doc: dict[str, Any],
         today: date,
@@ -240,6 +244,8 @@ class LLMExtractor:
                 prompt_subject=from_prompt.get("subject"),
                 llm_subject=fields.subject.strip() or None,
                 known_subjects=known_subjects,
+                prompt=prompt,
+                markdown=markdown,
             ),
             number=number,
             title=title,
@@ -378,20 +384,56 @@ _LAB_PREFIX = re.compile(
 def _meaningful_title(title: str) -> str | None:
     """«Лабораторная работа 4. Свёртки» → «Свёртки»; «Лабораторная работа 4» — не тема."""
     clean = _LAB_PREFIX.sub("", title.strip(), count=1).strip(" .:—–-")
+    clean = re.sub(r"^(?:по|на\s+тему|тема)\s+", "", clean, flags=re.IGNORECASE).strip(' .:—–-«»"')
     return clean or None
 
 
 def _pick_subject(
-    *, prompt_subject: object, llm_subject: str | None, known_subjects: Sequence[str]
+    *,
+    prompt_subject: object,
+    llm_subject: str | None,
+    known_subjects: Sequence[str],
+    prompt: str | None,
+    markdown: str,
 ) -> str | None:
-    """Существующий предмет важнее синонима: «ОС» в промпте + «Операционные системы» в БД."""
+    """Предмет: существующий > из короткой подписи > от модели, только если он «заземлён».
+
+    Модель склонна выдавать тему задания за предмет («Обучение с подкреплением» вместо
+    «Нейронные сети»). Её вариант принимаем, только если он есть в подписи владельца (с учётом
+    склонения) или явно указан в документе («Дисциплина: …»); иначе — пусто, бот переспросит.
+    """
     known = {name.casefold(): name for name in known_subjects}
     prompt_text = str(prompt_subject) if prompt_subject else None
     if prompt_text and prompt_text.casefold() in known:
         return known[prompt_text.casefold()]
     if llm_subject and llm_subject.casefold() in known:
         return known[llm_subject.casefold()]
-    return prompt_text or llm_subject
+    if prompt_text:
+        return prompt_text
+    if llm_subject and _grounded(llm_subject, prompt or "", markdown):
+        return llm_subject
+    return None
+
+
+_SUBJECT_LABEL = re.compile(
+    r"^[\s#*]*(?:дисциплина|предмет|курс)\s*[:—–-]\s*(.+)$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _stems(text: str) -> set[str]:
+    """Грубые основы слов: «нейронным сетям» и «Нейронные сети» дают одно и то же."""
+    words = re.findall(r"\w+", text.casefold().replace("ё", "е"))
+    return {word[:4] if len(word) >= 6 else word[:3] for word in words if len(word) >= 3}
+
+
+def _grounded(subject: str, prompt: str, markdown: str) -> bool:
+    stems = _stems(subject)
+    if not stems:
+        return False
+    if stems <= _stems(prompt):
+        return True
+    labels = " ".join(match[1] for match in _SUBJECT_LABEL.finditer(markdown[:5000]))
+    return stems <= _stems(labels)
 
 
 def _cache_key(

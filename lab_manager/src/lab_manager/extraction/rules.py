@@ -20,6 +20,8 @@ _NUMBER_LIST = re.compile(
     re.IGNORECASE,
 )
 MAX_RANGE = 10
+MAX_SUBJECT_WORDS = 4
+MAX_TITLE_WORDS = 8
 _DATE = re.compile(
     r"(?<![\d.])(\d{1,2})\.(\d{1,2})(?:\.(\d{4}|\d{2}))?(?![\d.])"
     r"(?:\s+(?:в\s+)?(\d{1,2}):(\d{2}))?"
@@ -35,6 +37,10 @@ _SEGMENTS = re.compile(r"[,;\n]")
 DEFAULT_TIME = time(23, 59)
 PAST_TOLERANCE = timedelta(days=60)  # недавно прошедшая дата — просрочка, а не следующий год
 HEAD_LINES = 30
+
+
+def _is_short(text: str, max_words: int) -> bool:
+    return len(text.split()) <= max_words and len(text) <= max_words * 15
 
 
 def _clean(text: str) -> str:
@@ -109,10 +115,12 @@ class RuleBasedExtractor:
                 continue
             free.append(_clean(segment))
         free = [text for text in free if text]
-        if free:
+        # Предмет и тема — только из коротких фрагментов подписи («Нейронные сети, ЛР 4»).
+        # Длинную фразу («задание по лабораторной по нейронным сетям…») разбирает LLM.
+        if free and _is_short(free[0], MAX_SUBJECT_WORDS):
             found["subject"] = free[0]
-        if len(free) > 1:
-            found["title"] = free[1]
+            if len(free) > 1 and _is_short(free[1], MAX_TITLE_WORDS):
+                found["title"] = free[1]
         return found
 
     def from_document(self, markdown: str, today: date, tz: ZoneInfo) -> dict[str, Any]:

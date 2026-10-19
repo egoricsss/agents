@@ -12,7 +12,7 @@ from lab_manager.db import Database
 from lab_manager.extraction import LabExtraction
 from lab_manager.extraction.llm import FUNCTION_NAME, PROMPT_VERSION, LLMExtractor
 from lab_manager.llm.gigachat import GigaChatClient
-from tests.fixtures import ASSIGNMENT_TEXT
+from tests.fixtures import ASSIGNMENT_TEXT, RL_POST
 from tests.llm.fake_gigachat import CREDENTIALS, FakeGigaChat
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -74,7 +74,9 @@ async def test_fields_come_from_llm_and_year_is_resolved_by_code(
 ) -> None:
     fake.replies = [reply()]
 
-    result = await extract(extractor)
+    result = await extract(
+        extractor, markdown="Дисциплина: Операционные системы\n\n" + ASSIGNMENT_TEXT
+    )
 
     assert result.subject == "Операционные системы"
     assert result.number == 3
@@ -386,6 +388,8 @@ async def test_generic_title_is_treated_as_missing(
         ("Лабораторная работа 4 RL", "RL"),
         ("ЛР 4. Свёртки", "Свёртки"),
         ("Лаба №2: Индексы", "Индексы"),
+        ("Лабораторная работа по RL", "RL"),
+        ("Лабораторная работа на тему «Свёртки»", "Свёртки"),
         ("Лабиринты на графах", "Лабиринты на графах"),
         ("Lab-сеть и VLAN", "Lab-сеть и VLAN"),
     ],
@@ -398,3 +402,25 @@ async def test_lab_prefix_is_stripped_from_title(
     [lab] = await extract_all(extractor, prompt="Нейронные сети, ЛР 4", markdown="Публикую ЛР 4.")
 
     assert lab.title == expected
+
+
+async def test_topic_is_not_accepted_as_subject(
+    extractor: LLMExtractor, fake: FakeGigaChat
+) -> None:
+    fake.replies = [reply(subject="Обучение с подкреплением", number=3)]
+
+    [lab] = await extract_all(extractor, markdown=RL_POST)
+
+    assert lab.subject is None
+    assert lab.missing_fields == ["subject"]
+
+
+async def test_subject_from_long_owner_phrase_in_other_case(
+    extractor: LLMExtractor, fake: FakeGigaChat
+) -> None:
+    fake.replies = [reply(subject="Нейронные сети", number=4)]
+    phrase = "Задание по лабораторной работе по нейронным сетям — создай папки для ЛР 4"
+
+    [lab] = await extract_all(extractor, prompt=phrase, markdown=RL_POST)
+
+    assert lab.subject == "Нейронные сети"

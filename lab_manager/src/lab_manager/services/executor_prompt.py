@@ -145,6 +145,8 @@ class ExecutorPromptBuilder:
         lab_id = payload.get("lab_id")
         if not isinstance(lab_id, int):
             raise ValueError(f"некорректный payload задачи {BUILD_PROMPT_JOB}: {payload!r}")
+        if await self.db.labs.get(lab_id) is None:
+            return  # лабу удалили, пока задача ждала в очереди
         await self.write(lab_id)
 
     async def _requirements(self, lab: Lab) -> Requirements:

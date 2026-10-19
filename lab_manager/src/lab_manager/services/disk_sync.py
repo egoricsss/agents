@@ -64,4 +64,6 @@ class DiskSync:
         lab_id = payload.get("lab_id")
         if not isinstance(lab_id, int):
             raise ValueError(f"некорректный payload задачи {self.job_kind}: {payload!r}")
+        if await self.db.labs.get(lab_id) is None:
+            return  # лабу удалили, пока задача ждала в очереди
         await self.sync_lab(lab_id)

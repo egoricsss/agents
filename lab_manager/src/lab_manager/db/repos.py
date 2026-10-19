@@ -136,6 +136,16 @@ class SubjectRepo(_Repo):
         assert subject is not None  # noqa: S101
         return subject
 
+    async def delete_if_empty(self, subject_id: int) -> bool:
+        """Удаляет предмет без лаб (чтобы ошибочный предмет не «притягивал» новые задания)."""
+        async with self._db.transaction():
+            cursor = await self._conn.execute(
+                "DELETE FROM subjects WHERE id = ? AND NOT EXISTS"
+                " (SELECT 1 FROM labs WHERE subject_id = ?)",
+                [subject_id, subject_id],
+            )
+            return cursor.rowcount > 0
+
     async def list(self) -> list[Subject]:
         rows = await self._all("SELECT id, name, created_at FROM subjects ORDER BY name_key")
         return [self._model(row) for row in rows]
@@ -258,6 +268,13 @@ class LabRepo(_Repo):
             " VALUES (?, ?, ?, ?, ?)",
             [lab_id, old.value if old else None, new.value, source.value, at],
         )
+
+    async def delete(self, lab_id: int) -> None:
+        """Удаляет лабу; файлы, история и требования удаляются каскадом."""
+        async with self._db.transaction():
+            cursor = await self._conn.execute("DELETE FROM labs WHERE id = ?", [lab_id])
+            if cursor.rowcount == 0:
+                raise NotFoundError(f"лаба {lab_id} не найдена")
 
     async def history(self, lab_id: int) -> list[StatusChange]:
         rows = await self._all(

@@ -50,6 +50,7 @@ from lab_manager.services.labs import (
     parse_status,
     subject_matches,
 )
+from lab_manager.services.removal import LabRemover
 from lab_manager.services.requirements import RequirementsService
 
 log = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ class LabAgent:
         disk_root: str = "app:/Лабы",
         max_file_bytes: int = MAX_FILE_BYTES,
         on_text: TextHandler | None = None,
+        remover: LabRemover | None = None,
     ) -> None:
         self.db = db
         self.ingest = ingest
@@ -104,6 +106,7 @@ class LabAgent:
         self.disk_root = disk_root
         self.max_file_bytes = max_file_bytes
         self.on_text = on_text  # свободный текст → диалоговый агент (шаг 7b)
+        self.remover = remover
         self._pending: dict[str, PendingIngest] = {}
         self._questions: dict[tuple[int, int], str] = {}  # (chat, message_id) → token
         self._last_question: dict[int, str] = {}  # chat → token
@@ -116,6 +119,7 @@ class LabAgent:
             ("status", "Статус: /status ОС 3 сделано"),
             ("req", "Требования: /req ОС 3: вариант 7"),
             ("prompt", "Промпт для исполнителя: /prompt ОС 3"),
+            ("delete", "Удалить ошибочную лабу: /delete #1"),
         ]
 
     # ------------------------------------------------------------------ роутер
@@ -128,6 +132,7 @@ class LabAgent:
         router.message.register(self.cmd_status, Command("status"))
         router.message.register(self.cmd_req, Command("req"))
         router.message.register(self.cmd_prompt, Command("prompt"))
+        router.message.register(self.cmd_delete, Command("delete"))
         router.callback_query.register(self.on_callback, F.data.startswith(f"{NAME}:"))
         return router
 
@@ -141,6 +146,14 @@ class LabAgent:
             m for m in burst.messages if m.text and not m.forward_origin and not m.document
         ]
         prompt = "\n".join(m.text for m in own_texts if m.text) or None
+        log.info(
+            "burst chat=%s: %d docs, %d forwards, %d own texts (prompt %d chars)",
+            burst.chat_id,
+            len(documents),
+            len(forwards),
+            len(own_texts),
+            len(prompt or ""),
+        )
 
         if documents or forwards:
             if prompt is None:
@@ -211,6 +224,15 @@ class LabAgent:
             )
             return
 
+        log.info(
+            "preview %s (%d bytes): duplicate=%s missing=%s confirm=%s labs=%s",
+            filename,
+            len(data),
+            preview.duplicate is not None,
+            preview.missing,
+            preview.needs_confirmation,
+            [(e.subject, e.number, round(e.confidence, 2)) for e in preview.extractions],
+        )
         if preview.duplicate:
             await bot.send_message(chat_id, fmt.duplicate(preview.duplicate.items))
             return
@@ -281,6 +303,28 @@ class LabAgent:
             else:
                 await self._store(bot, pending, pending.extractions or ())
             await self._drop_buttons(query)
+            return
+
+        if action in {"del", "keep"} and len(parts) == 3:
+            await self._drop_buttons(query)
+            if action == "keep":
+                await bot.send_message(chat_id, "Оставил как есть.")
+                return
+            if self.remover is None:
+                await bot.send_message(chat_id, "Удаление не настроено.")
+                return
+            try:
+                view = await self.queries.view(int(parts[2]))
+                await self.remover.remove(view.lab.id)
+            except (ValueError, NotFoundError):
+                await bot.send_message(chat_id, "Лаба уже удалена.")
+                return
+            log.info("lab %s deleted by owner", view.lab.id)
+            await bot.send_message(
+                chat_id,
+                f"🗑 Удалена: {fmt.lab_header(view.subject, view.lab)}. "
+                "Теперь можно прислать задание заново с правильной подписью.",
+            )
             return
 
         if action == "st" and len(parts) == 4:
@@ -392,6 +436,27 @@ class LabAgent:
         await message.answer_document(
             BufferedInputFile(prompt.encode("utf-8"), filename=PROMPT_FILE),
             caption=f"Промпт для исполнителя: {fmt.lab_header(view.subject, view.lab)}",
+        )
+
+    async def cmd_delete(self, message: Message, command: CommandObject) -> None:
+        view = await self._resolve_one(message, command.args, "delete")
+        if view is None:
+            return
+        await message.answer(
+            f"Удалить {fmt.lab_header(view.subject, view.lab)}?\n"
+            "Удалятся запись, локальная папка и папка на Диске (вместе с отчётами).",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🗑 Удалить", callback_data=f"{NAME}:del:{view.lab.id}"
+                        ),
+                        InlineKeyboardButton(
+                            text="Оставить", callback_data=f"{NAME}:keep:{view.lab.id}"
+                        ),
+                    ]
+                ]
+            ),
         )
 
     # ------------------------------------------------------------------ помощники
