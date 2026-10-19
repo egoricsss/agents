@@ -18,6 +18,7 @@ from lab_manager.extraction import LabExtraction, LabExtractor
 from lab_manager.storage import ASSIGNMENT_DIR, LabStorage
 
 DISK_SYNC_JOB = "disk_sync"
+BUILD_PROMPT_JOB = "build_prompt"
 MAX_FILE_BYTES = 20 * 1024 * 1024  # лимит Bot API на скачивание файла
 ASSIGNMENT_MARKDOWN = f"{ASSIGNMENT_DIR}/assignment.md"
 TEXT_MESSAGE_FILENAME = "задание.md"
@@ -126,6 +127,7 @@ class IngestService:
                     deadline=extraction.deadline,
                     summary=extraction.summary,
                     folder=self.storage.lab_folder(subject.name, extraction.number, title),
+                    artifacts=extraction.requirements,
                     source=source,
                 )
             else:
@@ -144,7 +146,13 @@ class IngestService:
                 local_path=local_path,
             )
             self.storage.write_text(folder, ASSIGNMENT_MARKDOWN, document.markdown)
-            # Transactional outbox: задача на выгрузку появляется только вместе с файлом.
+            # Transactional outbox: задачи появляются только вместе с файлом.
+            # build_prompt идёт раньше disk_sync (очередь FIFO), чтобы промпт уехал на Диск сразу.
+            await self.db.jobs.enqueue(
+                BUILD_PROMPT_JOB,
+                {"lab_id": lab.id},
+                idempotency_key=f"{BUILD_PROMPT_JOB}:file:{record.id}",
+            )
             await self.db.jobs.enqueue(
                 DISK_SYNC_JOB,
                 {"lab_id": lab.id},
@@ -174,6 +182,8 @@ class IngestService:
             changes["deadline"] = extraction.deadline
         if extraction.summary:
             changes["summary"] = extraction.summary
+        if extraction.requirements:
+            changes["artifacts"] = extraction.requirements
         return await self.db.labs.update(lab.id, **changes) if changes else lab  # type: ignore[arg-type]
 
     @staticmethod

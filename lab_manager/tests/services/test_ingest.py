@@ -252,3 +252,37 @@ async def test_known_subjects_are_passed_to_extractor(
     await ingest(service, b"another assignment text that is long enough", prompt="Сети, лаба 1")
 
     assert extractor.known_subjects == ["ОС"]
+
+
+class ArtifactsExtractor(CountingExtractor):
+    async def extract(
+        self,
+        *,
+        markdown: str,
+        prompt: str | None,
+        today: date,
+        tz: ZoneInfo,
+        known_subjects: Sequence[str] = (),
+    ) -> LabExtraction:
+        base = await super().extract(markdown=markdown, prompt=prompt, today=today, tz=tz)
+        return base.model_copy(update={"requirements": ["Программа", "Отчёт"]})
+
+
+async def test_artifacts_stored_and_prompt_build_queued_first(
+    db: Database, storage: LabStorage, tmp_path: Path
+) -> None:
+    service = IngestService(
+        db=db,
+        storage=storage,
+        converter=DocumentConverter(cache_dir=tmp_path / "cache"),
+        extractor=ArtifactsExtractor(),
+        tz=MSK,
+    )
+
+    result = await ingest(service, ASSIGNMENT_TEXT.encode())
+
+    assert result.lab is not None and result.lab.artifacts == ["Программа", "Отчёт"]
+    first = await db.jobs.claim_next()
+    second = await db.jobs.claim_next()
+    assert first is not None and first.kind == "build_prompt"
+    assert second is not None and second.kind == "disk_sync"

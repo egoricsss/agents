@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -95,6 +95,10 @@ class _Repo:
         return row_id
 
 
+def _json_list(items: Sequence[str]) -> str:
+    return json.dumps(list(items), ensure_ascii=False)
+
+
 def normalize_name(name: str) -> str:
     return " ".join(name.split())
 
@@ -138,14 +142,17 @@ class SubjectRepo(_Repo):
 
 
 _LAB_COLUMNS = (
-    "id, subject_id, number, title, status, deadline, summary, folder, created_at, updated_at"
+    "id, subject_id, number, title, status, deadline, summary, folder, artifacts,"
+    " created_at, updated_at"
 )
 
 
 class LabRepo(_Repo):
     @staticmethod
     def _model(row: aiosqlite.Row) -> Lab:
-        return Lab.model_validate(_row(row, "deadline", "created_at", "updated_at"))
+        data = _row(row, "deadline", "created_at", "updated_at")
+        data["artifacts"] = json.loads(data["artifacts"])
+        return Lab.model_validate(data)
 
     async def get(self, lab_id: int) -> Lab | None:
         row = await self._one(f"SELECT {_LAB_COLUMNS} FROM labs WHERE id = ?", [lab_id])  # noqa: S608
@@ -174,6 +181,7 @@ class LabRepo(_Repo):
         deadline: datetime | None = None,
         summary: str = "",
         folder: str | None = None,
+        artifacts: Sequence[str] = (),
     ) -> Lab:
         if number < 1:
             raise ValueError("номер лабы должен быть >= 1")
@@ -183,8 +191,19 @@ class LabRepo(_Repo):
             with _integrity(f"лаба {number}"):
                 lab_id = await self._insert(
                     "INSERT INTO labs (subject_id, number, title, deadline, summary, folder,"
-                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    [subject_id, number, title, deadline_db, summary, folder, now, now],
+                    " artifacts,"
+                    " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        subject_id,
+                        number,
+                        title,
+                        deadline_db,
+                        summary,
+                        folder,
+                        _json_list(artifacts),
+                        now,
+                        now,
+                    ],
                 )
             await self._log_status(lab_id, None, Status.TODO, source, now)
         return await self._require(lab_id)
@@ -196,6 +215,7 @@ class LabRepo(_Repo):
         title: str = _UNSET,
         deadline: datetime | None = _UNSET,
         summary: str = _UNSET,
+        artifacts: Sequence[str] = _UNSET,
     ) -> Lab:
         changes: dict[str, Any] = {}
         if title is not _UNSET:
@@ -204,6 +224,8 @@ class LabRepo(_Repo):
             changes["deadline"] = to_db(deadline)
         if summary is not _UNSET:
             changes["summary"] = summary
+        if artifacts is not _UNSET:
+            changes["artifacts"] = _json_list(artifacts)
         async with self._db.transaction():
             await self._require(lab_id)
             if changes:

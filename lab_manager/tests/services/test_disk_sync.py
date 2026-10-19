@@ -145,3 +145,25 @@ async def test_ingest_to_disk_end_to_end_via_queue(
 async def test_bad_job_payload_rejected(sync: DiskSync) -> None:
     with pytest.raises(ValueError, match="payload"):
         await sync.handle_job({"lab_id": "1"})
+
+
+async def test_prompt_files_reach_disk_through_queue(
+    sync: DiskSync, ingest: IngestService, fake: FakeDisk, db: Database, storage: LabStorage
+) -> None:
+    from zoneinfo import ZoneInfo
+
+    from lab_manager.services.executor_prompt import ExecutorPromptBuilder
+    from lab_manager.worker import JobWorker
+
+    builder = ExecutorPromptBuilder(
+        db=db, storage=storage, disk_root=ROOT, tz=ZoneInfo("Europe/Moscow")
+    )
+    await add_lab(ingest)
+    worker = JobWorker(db, {"build_prompt": builder.handle_job, sync.job_kind: sync.handle_job})
+
+    while await worker.run_once():
+        pass
+
+    base = f"{ROOT}/ОС/03 Процессы и потоки"
+    for name in ("prompt.md", "lab.json", "requirements.md", "задание/assignment.md"):
+        assert f"{base}/{name}" in fake.files

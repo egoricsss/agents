@@ -23,10 +23,11 @@ from lab_manager.db import Database
 from lab_manager.extraction import LabExtraction
 from lab_manager.extraction.rules import RuleBasedExtractor, heading_number, parse_deadline
 from lab_manager.llm.gigachat import ChatResult, GigaChatClient, GigaChatError
+from lab_manager.prompts import escape_closing_tag
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = "extract_lab/v2"
+PROMPT_VERSION = "extract_lab/v3"
 PURPOSE = "extract_lab"
 FUNCTION_NAME = "save_lab"
 FALLBACK_CONFIDENCE = 0.4
@@ -236,7 +237,7 @@ class LLMExtractor:
     def _user_message(
         self, markdown: str, prompt: str | None, known_subjects: Sequence[str]
     ) -> str:
-        document = markdown[: self.max_doc_chars]
+        document = escape_closing_tag(markdown[: self.max_doc_chars], "document")
         if len(markdown) > self.max_doc_chars:
             document += "\n[…документ обрезан…]"
         subjects = ", ".join(known_subjects) if known_subjects else "пока нет"

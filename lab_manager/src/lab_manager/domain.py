@@ -57,6 +57,7 @@ class Lab(_Model):
     deadline: datetime | None
     summary: str
     folder: str | None
+    artifacts: list[str]
     created_at: datetime
     updated_at: datetime
 
