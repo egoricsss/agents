@@ -1,4 +1,7 @@
+# любые env-файлы и их бэкапы (nano: .env.save), кроме шаблона
 .env
+.env*
+!.env.example
 .venv/
 __pycache__/
 *.pyc

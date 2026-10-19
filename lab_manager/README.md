@@ -34,6 +34,7 @@ uv run ruff check . && uv run ruff format --check .
 | `GIGACHAT_CREDENTIALS` | да | — | ключ авторизации GigaChat |
 | `GIGACHAT_SCOPE` | нет | `GIGACHAT_API_PERS` | scope GigaChat |
 | `GIGACHAT_MODEL` | нет | `GigaChat-2` | модель |
+| `GIGACHAT_CA_BUNDLE_FILE` | для GigaChat | — | путь к корневому сертификату Минцифры (PEM) |
 | `TZ` | нет | `Europe/Moscow` | часовой пояс для дедлайнов |
 | `DATA_DIR` | нет | `data` | каталог для SQLite и файлов |
 | `LOG_LEVEL` | нет | `INFO` | уровень логирования |

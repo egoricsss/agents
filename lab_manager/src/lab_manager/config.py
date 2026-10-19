@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, FilePath, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 GigaChatScope = Literal["GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP"]
@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     gigachat_credentials: SecretStr
     gigachat_scope: GigaChatScope = "GIGACHAT_API_PERS"
     gigachat_model: str = "GigaChat-2"
+    # Корневой сертификат Минцифры (PEM): нужен для TLS к GigaChat.
+    gigachat_ca_bundle_file: FilePath | None = None
 
     tz: str = "Europe/Moscow"
     data_dir: Path = Path("data")
@@ -42,6 +44,11 @@ class Settings(BaseSettings):
         if not value.get_secret_value().strip():
             raise ValueError("секрет не может быть пустым")
         return value
+
+    @field_validator("gigachat_ca_bundle_file", mode="before")
+    @classmethod
+    def _empty_path_is_none(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("yandex_disk_root")
     @classmethod

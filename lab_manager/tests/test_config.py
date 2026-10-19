@@ -51,6 +51,28 @@ def test_defaults(env: pytest.MonkeyPatch) -> None:
     assert settings.zone == ZoneInfo("Europe/Moscow")
     assert settings.data_dir == Path("data")
     assert settings.log_level == "INFO"
+    assert settings.gigachat_ca_bundle_file is None
+
+
+def test_gigachat_ca_bundle_must_exist(env: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    env.setenv("GIGACHAT_CA_BUNDLE_FILE", str(tmp_path / "missing.pem"))
+
+    with pytest.raises(ValidationError, match="gigachat_ca_bundle_file"):
+        load()
+
+
+def test_gigachat_ca_bundle_empty_means_unset(env: pytest.MonkeyPatch) -> None:
+    env.setenv("GIGACHAT_CA_BUNDLE_FILE", "")
+
+    assert load().gigachat_ca_bundle_file is None
+
+
+def test_gigachat_ca_bundle_accepts_existing_file(env: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bundle = tmp_path / "ca.pem"
+    bundle.write_text("-----BEGIN CERTIFICATE-----\n")
+    env.setenv("GIGACHAT_CA_BUNDLE_FILE", str(bundle))
+
+    assert load().gigachat_ca_bundle_file == bundle
 
 
 def test_secrets_are_not_leaked_in_repr_or_dump(env: pytest.MonkeyPatch) -> None:
