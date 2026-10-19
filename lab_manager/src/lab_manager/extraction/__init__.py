@@ -1,5 +1,6 @@
 """Извлечение полей лабы из промпта владельца и текста задания."""
 
+from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -36,5 +37,13 @@ class LabExtractor(Protocol):
         ...
 
     async def extract(
-        self, *, markdown: str, prompt: str | None, today: date, tz: ZoneInfo
-    ) -> LabExtraction: ...
+        self,
+        *,
+        markdown: str,
+        prompt: str | None,
+        today: date,
+        tz: ZoneInfo,
+        known_subjects: Sequence[str] = (),
+    ) -> LabExtraction:
+        """`known_subjects` — уже существующие предметы, чтобы не плодить синонимы."""
+        ...

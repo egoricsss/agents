@@ -1,6 +1,7 @@
 """Сервис приёма заданий: идемпотентность, версии, переспрос, атомарность."""
 
 import asyncio
+from collections.abc import Sequence
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -33,12 +34,20 @@ class CountingExtractor:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.known_subjects: list[str] = []
         self._inner = RuleBasedExtractor()
 
     async def extract(
-        self, *, markdown: str, prompt: str | None, today: date, tz: ZoneInfo
+        self,
+        *,
+        markdown: str,
+        prompt: str | None,
+        today: date,
+        tz: ZoneInfo,
+        known_subjects: Sequence[str] = (),
     ) -> LabExtraction:
         self.calls += 1
+        self.known_subjects = list(known_subjects)
         return await self._inner.extract(markdown=markdown, prompt=prompt, today=today, tz=tz)
 
 
@@ -234,3 +243,12 @@ async def test_failed_ingest_enqueues_nothing(
         await ingest(service, ASSIGNMENT_TEXT.encode())
 
     assert await db.jobs.claim_next() is None
+
+
+async def test_known_subjects_are_passed_to_extractor(
+    service: IngestService, extractor: CountingExtractor
+) -> None:
+    await ingest(service, ASSIGNMENT_TEXT.encode())
+    await ingest(service, b"another assignment text that is long enough", prompt="Сети, лаба 1")
+
+    assert extractor.known_subjects == ["ОС"]

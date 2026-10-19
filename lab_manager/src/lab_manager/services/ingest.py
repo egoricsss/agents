@@ -98,8 +98,13 @@ class IngestService:
 
         document = await self.converter.convert(data, filename)
         today = self.db.clock().astimezone(self.tz).date()
+        known_subjects = [subject.name for subject in await self.db.subjects.list()]
         extraction = await self.extractor.extract(
-            markdown=document.markdown, prompt=prompt, today=today, tz=self.tz
+            markdown=document.markdown,
+            prompt=prompt,
+            today=today,
+            tz=self.tz,
+            known_subjects=known_subjects,
         )
         if extraction.missing_fields:
             return IngestResult(IngestOutcome.NEEDS_INFO, extraction=extraction)

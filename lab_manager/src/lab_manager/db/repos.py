@@ -7,6 +7,7 @@ import re
 import sqlite3
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -518,3 +519,66 @@ class JobRepo(_Repo):
             if cursor.rowcount == 0:
                 raise NotFoundError(f"задача {job_id} не найдена")
         return await self._require(job_id)
+
+
+@dataclass(frozen=True, slots=True)
+class LLMUsage:
+    calls: int
+    errors: int
+    prompt_tokens: int
+    completion_tokens: int
+
+
+class LLMRepo(_Repo):
+    """Кеш LLM-результатов и журнал вызовов (токены, латентность, ошибки) — без текстов."""
+
+    async def get_cached(self, cache_key: str) -> dict[str, Any] | None:
+        row = await self._one("SELECT value FROM llm_cache WHERE cache_key = ?", [cache_key])
+        return json.loads(row["value"]) if row else None
+
+    async def put_cached(self, cache_key: str, purpose: str, value: dict[str, Any]) -> None:
+        async with self._db.transaction():
+            await self._conn.execute(
+                "INSERT OR REPLACE INTO llm_cache (cache_key, purpose, value, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                [cache_key, purpose, json.dumps(value, ensure_ascii=False), self._now()],
+            )
+
+    async def record_call(
+        self,
+        *,
+        purpose: str,
+        model: str,
+        prompt_version: str,
+        latency_ms: int,
+        ok: bool,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        error: str | None = None,
+    ) -> None:
+        async with self._db.transaction():
+            await self._conn.execute(
+                "INSERT INTO llm_calls (purpose, model, prompt_version, prompt_tokens,"
+                " completion_tokens, latency_ms, ok, error, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    purpose,
+                    model,
+                    prompt_version,
+                    prompt_tokens,
+                    completion_tokens,
+                    latency_ms,
+                    int(ok),
+                    error,
+                    self._now(),
+                ],
+            )
+
+    async def usage(self, since: datetime | None = None) -> LLMUsage:
+        row = await self._one(
+            "SELECT COUNT(*), COALESCE(SUM(1 - ok), 0), COALESCE(SUM(prompt_tokens), 0),"
+            " COALESCE(SUM(completion_tokens), 0) FROM llm_calls WHERE created_at >= ?",
+            [to_db(since) if since else ""],
+        )
+        assert row is not None  # noqa: S101
+        return LLMUsage(int(row[0]), int(row[1]), int(row[2]), int(row[3]))

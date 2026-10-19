@@ -5,6 +5,7 @@
 """
 
 import re
+from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -39,15 +40,21 @@ class RuleBasedExtractor:
     version = "rules/v1"
 
     async def extract(
-        self, *, markdown: str, prompt: str | None, today: date, tz: ZoneInfo
+        self,
+        *,
+        markdown: str,
+        prompt: str | None,
+        today: date,
+        tz: ZoneInfo,
+        known_subjects: Sequence[str] = (),
     ) -> LabExtraction:
-        from_prompt = self._from_prompt(prompt or "", today, tz)
-        from_doc = self._from_document(markdown, today, tz)
+        from_prompt = self.from_prompt(prompt or "", today, tz)
+        from_doc = self.from_document(markdown, today, tz)
         merged = {key: from_prompt.get(key) or from_doc.get(key) for key in _FIELDS}
         result = LabExtraction(**merged)
         return result.model_copy(update={"confidence": 0.5 if result.missing_fields else 1.0})
 
-    def _from_prompt(self, prompt: str, today: date, tz: ZoneInfo) -> dict[str, object]:
+    def from_prompt(self, prompt: str, today: date, tz: ZoneInfo) -> dict[str, object]:
         found: dict[str, object] = {}
         free: list[str] = []
         for raw in _SEGMENTS.split(prompt):
@@ -72,7 +79,7 @@ class RuleBasedExtractor:
             found["title"] = free[1]
         return found
 
-    def _from_document(self, markdown: str, today: date, tz: ZoneInfo) -> dict[str, object]:
+    def from_document(self, markdown: str, today: date, tz: ZoneInfo) -> dict[str, object]:
         found: dict[str, object] = {}
         for line in markdown.splitlines()[:HEAD_LINES]:
             if "number" not in found and (heading := _LAB_HEADING.match(line)):
@@ -110,3 +117,20 @@ def _deadline(match: re.Match[str], today: date, tz: ZoneInfo) -> datetime | Non
     except ValueError:
         return None
     return datetime.combine(candidate, at, tzinfo=tz)
+
+
+def parse_deadline(text: str, today: date, tz: ZoneInfo) -> datetime | None:
+    """`ДД.ММ[.ГГГГ] [ЧЧ:ММ]` → срок с часовым поясом.
+
+    Год без явного указания выводится из `today`.
+    """
+    match = _DATE.search(text)
+    return _deadline(match, today, tz) if match else None
+
+
+def heading_number(markdown: str) -> int | None:
+    """Номер из заголовка «Лабораторная работа №N» — строгий признак, его не подделать текстом."""
+    for line in markdown.splitlines()[:HEAD_LINES]:
+        if heading := _LAB_HEADING.match(line):
+            return int(heading[1])
+    return None

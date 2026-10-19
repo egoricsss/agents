@@ -14,6 +14,7 @@ from lab_manager.db.repos import (
     FileRepo,
     JobRepo,
     LabRepo,
+    LLMRepo,
     RequirementRepo,
     SubjectRepo,
 )
@@ -38,6 +39,7 @@ class Database:
         self.files = FileRepo(self)
         self.requirements = RequirementRepo(self)
         self.jobs = JobRepo(self)
+        self.llm = LLMRepo(self)
 
     @classmethod
     @asynccontextmanager
