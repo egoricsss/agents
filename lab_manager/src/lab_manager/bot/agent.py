@@ -604,8 +604,12 @@ class LabAgent:
                 None,
             )
         open_views = [v for v in views if v.lab.status in OPEN_STATUSES]
-        text = "📚 <b>Лабы</b> — выберите предмет\n\n" + fmt.lab_list(
-            open_views, self.tz, empty="Открытых лаб нет 🎉"
+        text = (
+            "📚 <b>Лабы</b>\n\n"
+            + fmt.subjects_overview(views)
+            + "\n\n🔜 <b>Впереди</b>\n\n"
+            + fmt.lab_list(open_views, self.tz, empty="Всё сдано — красота 🎉")
+            + "\n\nВыберите предмет 👇"
         )
         by_subject: dict[int, list[LabView]] = {}
         for view in views:
