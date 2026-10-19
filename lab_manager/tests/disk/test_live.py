@@ -1,6 +1,6 @@
 """Живые тесты против настоящего Яндекс Диска. Запуск: `uv run pytest -m live`.
 
-Работают во временной папке `<YANDEX_DISK_ROOT>/_live_tests/<uuid>` и удаляют её в конце.
+Каждый тест работает в своей папке `<YANDEX_DISK_ROOT>/_live_test_<uuid>` и удаляет её.
 """
 
 import hashlib
@@ -33,11 +33,13 @@ async def disk(settings: Settings) -> AsyncIterator[YandexDiskClient]:
 
 @pytest.fixture
 async def sandbox(settings: Settings, disk: YandexDiskClient) -> AsyncIterator[str]:
-    parent = join_path(settings.yandex_disk_root, "_live_tests")
+    # Своя папка верхнего уровня на каждый тест: удаление на Диске асинхронное, и общая
+    # родительская папка была бы заблокирована (423) для следующего теста.
+    path = join_path(settings.yandex_disk_root, f"_live_test_{uuid.uuid4().hex}")
     try:
-        yield f"{parent}/{uuid.uuid4().hex}"
+        yield path
     finally:
-        await disk.delete(parent)  # тесты идут последовательно — убираем папку целиком
+        await disk.delete(path, wait=False)
 
 
 async def test_upload_roundtrip_is_idempotent(disk: YandexDiskClient, sandbox: str) -> None:

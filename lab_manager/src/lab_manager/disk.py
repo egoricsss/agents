@@ -19,7 +19,7 @@ from pydantic import SecretStr
 from lab_manager.errors import LabManagerError
 
 API_URL = "https://cloud-api.yandex.net/v1/disk"
-RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+RETRY_STATUSES = frozenset({423, 429, 500, 502, 503, 504})  # 423 — ресурс занят операцией
 MAX_RETRY_AFTER = 30.0
 
 Sleep = Callable[[float], Awaitable[None]]
@@ -75,7 +75,8 @@ class YandexDiskClient:
         sleep: Sleep = asyncio.sleep,
         timeout: float = 60.0,
         operation_poll_interval: float = 0.5,
-        operation_max_polls: int = 120,
+        operation_max_poll_interval: float = 5.0,
+        operation_max_polls: int = 60,
     ) -> None:
         self._token = token if isinstance(token, SecretStr) else SecretStr(token)
         self._owns_http = http is None
@@ -85,6 +86,7 @@ class YandexDiskClient:
         self.backoff = backoff
         self._sleep = sleep
         self.operation_poll_interval = operation_poll_interval
+        self.operation_max_poll_interval = operation_max_poll_interval
         self.operation_max_polls = operation_max_polls
 
     def __repr__(self) -> str:
@@ -143,17 +145,18 @@ class YandexDiskClient:
         await self._send("PUT", href, content=data, auth=False, ok={201, 202})
         return UploadResult.UPLOADED
 
-    async def delete(self, path: str) -> None:
-        """Удаляет навсегда. Папки Диск удаляет асинхронно (202) — дожидаемся операции."""
+    async def delete(self, path: str, *, wait: bool = True) -> None:
+        """Удаляет навсегда. Папки Диск удаляет асинхронно (202): с `wait` ждём операцию."""
         response = await self._api(
             "DELETE", "/resources", {"path": path, "permanently": "true"}, ok={202, 204, 404}
         )
-        if response.status_code == 202:
+        if response.status_code == 202 and wait:
             await self._wait_operation(response.json()["href"])
 
     async def _wait_operation(self, href: str) -> None:
         if httpx.URL(href).host != httpx.URL(self.base_url).host:
             raise DiskError(0, "unexpected operation host")
+        interval = self.operation_poll_interval
         for _ in range(self.operation_max_polls):
             response = await self._send("GET", href, auth=True, ok={200})
             status = response.json().get("status")
@@ -161,7 +164,8 @@ class YandexDiskClient:
                 return
             if status == "failed":
                 raise DiskError(response.status_code, "operation failed")
-            await self._sleep(self.operation_poll_interval)
+            await self._sleep(interval)
+            interval = min(interval * 1.5, self.operation_max_poll_interval)
         raise DiskError(0, "operation timeout")
 
     async def _api(

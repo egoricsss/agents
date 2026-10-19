@@ -105,7 +105,7 @@ async def test_delete_is_idempotent(disk: YandexDiskClient, fake: FakeDisk) -> N
     assert "app:/dir" not in fake.dirs
 
 
-@pytest.mark.parametrize("status", [429, 500, 503])
+@pytest.mark.parametrize("status", [423, 429, 500, 503])
 async def test_transient_errors_are_retried(
     disk: YandexDiskClient, fake: FakeDisk, status: int
 ) -> None:
@@ -180,3 +180,33 @@ async def test_async_operation_wait_is_bounded(fake: FakeDisk) -> None:
 
         with pytest.raises(DiskError, match="timeout"):
             await disk.delete("app:/dir")
+
+
+async def test_delete_without_waiting_returns_immediately(
+    disk: YandexDiskClient, fake: FakeDisk
+) -> None:
+    fake.operation_polls_before_done = 100
+    await disk.ensure_dir("app:/dir")
+    calls_before = len(fake.api_calls)
+
+    await disk.delete("app:/dir", wait=False)
+
+    assert len(fake.api_calls) == calls_before + 1  # только DELETE, без опроса операции
+
+
+async def test_operation_polling_backs_off(fake: FakeDisk) -> None:
+    delays: list[float] = []
+
+    async def record(delay: float) -> None:
+        delays.append(delay)
+
+    fake.operation_polls_before_done = 6
+    async with httpx.AsyncClient(transport=fake.transport()) as http:
+        disk = YandexDiskClient(TOKEN, http=http, sleep=record)
+        await disk.ensure_dir("app:/dir")
+        await disk.delete("app:/dir")
+
+    assert delays == sorted(delays)
+    assert delays[0] == 0.5
+    assert delays[-1] > delays[0]
+    assert max(delays) <= 5.0
