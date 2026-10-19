@@ -14,7 +14,7 @@ from lab_manager.converter import DocumentConverter
 from lab_manager.db import Database
 from lab_manager.domain import FileRecord, Lab, Source, Subject
 from lab_manager.errors import FileTooLargeError, UnsupportedFormatError
-from lab_manager.extraction import LabExtraction, LabExtractor
+from lab_manager.extraction import REQUIRED_FIELDS, LabExtraction, LabExtractor
 from lab_manager.storage import ASSIGNMENT_DIR, LabStorage
 
 DISK_SYNC_JOB = "disk_sync"
@@ -34,20 +34,63 @@ class IngestOutcome(StrEnum):
 class IngestWarning(StrEnum):
     NO_TEXT = "no_text"  # скан без текстового слоя: файл сохранён, текст не извлечён
     NO_DEADLINE = "no_deadline"
+    LOW_CONFIDENCE = "low_confidence"  # расхождение номеров или разбор без LLM — подтвердить
+
+
+LOW_CONFIDENCE = 0.5
+
+
+@dataclass(frozen=True, slots=True)
+class IngestedLab:
+    """Результат по одной лабе из сообщения."""
+
+    outcome: IngestOutcome
+    lab: Lab
+    subject: Subject | None
+    file: FileRecord
+    extraction: LabExtraction | None = None
+    warnings: tuple[IngestWarning, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class IngestResult:
+    """Результат по сообщению: одна или несколько лаб (`items`).
+
+    `lab`, `subject`, `file`, `extraction`, `warnings` — первой лабы, для простого случая.
+    """
+
     outcome: IngestOutcome
-    lab: Lab | None = None
-    subject: Subject | None = None
-    file: FileRecord | None = None
-    extraction: LabExtraction | None = None
-    warnings: tuple[IngestWarning, ...] = field(default=())
+    items: tuple[IngestedLab, ...] = ()
+    extractions: tuple[LabExtraction, ...] = field(default=())
+
+    @property
+    def lab(self) -> Lab | None:
+        return self.items[0].lab if self.items else None
+
+    @property
+    def subject(self) -> Subject | None:
+        return self.items[0].subject if self.items else None
+
+    @property
+    def file(self) -> FileRecord | None:
+        return self.items[0].file if self.items else None
+
+    @property
+    def extraction(self) -> LabExtraction | None:
+        return self.extractions[0] if self.extractions else None
+
+    @property
+    def warnings(self) -> tuple[IngestWarning, ...]:
+        return self.items[0].warnings if self.items else ()
 
     @property
     def missing(self) -> list[str]:
-        return self.extraction.missing_fields if self.extraction else []
+        fields = {name for extraction in self.extractions for name in extraction.missing_fields}
+        return [name for name in REQUIRED_FIELDS if name in fields]
+
+    @property
+    def labs(self) -> list[Lab]:
+        return [item.lab for item in self.items]
 
 
 class IngestService:
@@ -71,7 +114,7 @@ class IngestService:
     async def ingest_text(
         self, text: str, *, prompt: str | None, source: Source = Source.TELEGRAM
     ) -> IngestResult:
-        """Задание, присланное обычным сообщением, хранится как Markdown-файл."""
+        """Задание без файла (например, пересланный пост) хранится как Markdown-файл."""
         return await self.ingest(
             data=text.encode("utf-8"),
             filename=TEXT_MESSAGE_FILENAME,
@@ -88,6 +131,7 @@ class IngestService:
         mime_type: str | None = None,
         source: Source = Source.TELEGRAM,
     ) -> IngestResult:
+        """Одно сообщение → одна или несколько лаб: новые создаются, существующие обновляются."""
         if len(data) > self.max_bytes:
             raise FileTooLargeError(f"файл больше {self.max_bytes // (1024 * 1024)} МБ")
         if not self.converter.supports(filename):
@@ -100,74 +144,113 @@ class IngestService:
         document = await self.converter.convert(data, filename)
         today = self.db.clock().astimezone(self.tz).date()
         known_subjects = [subject.name for subject in await self.db.subjects.list()]
-        extraction = await self.extractor.extract(
-            markdown=document.markdown,
-            prompt=prompt,
-            today=today,
-            tz=self.tz,
-            known_subjects=known_subjects,
+        extractions = tuple(
+            await self.extractor.extract_all(
+                markdown=document.markdown,
+                prompt=prompt,
+                today=today,
+                tz=self.tz,
+                known_subjects=known_subjects,
+            )
         )
-        if extraction.missing_fields:
-            return IngestResult(IngestOutcome.NEEDS_INFO, extraction=extraction)
-        assert extraction.subject is not None and extraction.number is not None  # noqa: S101
+        if any(extraction.missing_fields for extraction in extractions):
+            return IngestResult(IngestOutcome.NEEDS_INFO, extractions=extractions)
 
-        warnings = self._warnings(document.has_text, extraction)
+        items: list[IngestedLab] = []
         async with self.db.transaction():
             if duplicate := await self._duplicate(sha256):
                 return duplicate
-            subject = await self.db.subjects.get_or_create(extraction.subject)
-            lab = await self.db.labs.find(subject.id, extraction.number)
-            if lab is None:
-                outcome = IngestOutcome.CREATED
-                title = extraction.title or ""
-                lab = await self.db.labs.create(
-                    subject_id=subject.id,
-                    number=extraction.number,
-                    title=title or f"Лабораторная работа {extraction.number}",
-                    deadline=extraction.deadline,
-                    summary=extraction.summary,
-                    folder=self.storage.lab_folder(subject.name, extraction.number, title),
-                    artifacts=extraction.requirements,
-                    source=source,
+            for extraction in extractions:
+                items.append(
+                    await self._store(
+                        extraction,
+                        document.markdown,
+                        document.has_text,
+                        data=data,
+                        sha256=sha256,
+                        filename=filename,
+                        mime_type=mime_type,
+                        source=source,
+                    )
                 )
-            else:
-                outcome = IngestOutcome.NEW_VERSION
-                lab = await self._refresh(lab, extraction)
-            folder = lab.folder or self.storage.lab_folder(subject.name, lab.number, lab.title)
+        outcomes = {item.outcome for item in items}
+        outcome = (
+            IngestOutcome.CREATED
+            if IngestOutcome.CREATED in outcomes
+            else IngestOutcome.NEW_VERSION
+        )
+        return IngestResult(outcome, tuple(items), extractions)
 
-            version = await self._next_version(lab.id)
-            local_path = self.storage.save_original(folder, version, filename, data)
-            record = await self.db.files.add(
-                lab_id=lab.id,
-                sha256=sha256,
-                original_name=filename,
-                mime_type=mime_type,
-                size_bytes=len(data),
-                local_path=local_path,
+    async def _store(
+        self,
+        extraction: LabExtraction,
+        markdown: str,
+        has_text: bool,
+        *,
+        data: bytes,
+        sha256: str,
+        filename: str,
+        mime_type: str | None,
+        source: Source,
+    ) -> IngestedLab:
+        assert extraction.subject is not None and extraction.number is not None  # noqa: S101
+        subject = await self.db.subjects.get_or_create(extraction.subject)
+        lab = await self.db.labs.find(subject.id, extraction.number)
+        if lab is None:
+            outcome = IngestOutcome.CREATED
+            title = extraction.title or ""
+            lab = await self.db.labs.create(
+                subject_id=subject.id,
+                number=extraction.number,
+                title=title or f"Лабораторная работа {extraction.number}",
+                deadline=extraction.deadline,
+                summary=extraction.summary,
+                folder=self.storage.lab_folder(subject.name, extraction.number, title),
+                artifacts=extraction.requirements,
+                source=source,
             )
-            self.storage.write_text(folder, ASSIGNMENT_MARKDOWN, document.markdown)
-            # Transactional outbox: задачи появляются только вместе с файлом.
-            # build_prompt идёт раньше disk_sync (очередь FIFO), чтобы промпт уехал на Диск сразу.
-            await self.db.jobs.enqueue(
-                BUILD_PROMPT_JOB,
-                {"lab_id": lab.id},
-                idempotency_key=f"{BUILD_PROMPT_JOB}:file:{record.id}",
-            )
-            await self.db.jobs.enqueue(
-                DISK_SYNC_JOB,
-                {"lab_id": lab.id},
-                idempotency_key=f"{DISK_SYNC_JOB}:file:{record.id}",
-            )
+        else:
+            outcome = IngestOutcome.NEW_VERSION
+            lab = await self._refresh(lab, extraction)
+        folder = lab.folder or self.storage.lab_folder(subject.name, lab.number, lab.title)
 
-        return IngestResult(outcome, lab, subject, record, extraction, warnings)
+        version = await self._next_version(lab.id)
+        local_path = self.storage.save_original(folder, version, filename, data)
+        record = await self.db.files.add(
+            lab_id=lab.id,
+            sha256=sha256,
+            original_name=filename,
+            mime_type=mime_type,
+            size_bytes=len(data),
+            local_path=local_path,
+        )
+        self.storage.write_text(folder, ASSIGNMENT_MARKDOWN, markdown)
+        # Transactional outbox: задачи появляются только вместе с файлом.
+        # build_prompt идёт раньше disk_sync (очередь FIFO), чтобы промпт уехал на Диск сразу.
+        await self.db.jobs.enqueue(
+            BUILD_PROMPT_JOB,
+            {"lab_id": lab.id},
+            idempotency_key=f"{BUILD_PROMPT_JOB}:file:{record.id}",
+        )
+        await self.db.jobs.enqueue(
+            DISK_SYNC_JOB,
+            {"lab_id": lab.id},
+            idempotency_key=f"{DISK_SYNC_JOB}:file:{record.id}",
+        )
+        return IngestedLab(
+            outcome, lab, subject, record, extraction, self._warnings(has_text, extraction)
+        )
 
     async def _duplicate(self, sha256: str) -> IngestResult | None:
-        record = await self.db.files.get_by_sha256(sha256)
-        if record is None:
-            return None
-        lab = await self.db.labs.get(record.lab_id)
-        subject = await self.db.subjects.get(lab.subject_id) if lab else None
-        return IngestResult(IngestOutcome.DUPLICATE, lab, subject, record)
+        """Это содержимое уже обработано (в одной или нескольких лабах) — ничего не делаем."""
+        items = []
+        for record in await self.db.files.list_by_sha256(sha256):
+            lab = await self.db.labs.get(record.lab_id)
+            if lab is None:
+                continue
+            subject = await self.db.subjects.get(lab.subject_id)
+            items.append(IngestedLab(IngestOutcome.DUPLICATE, lab, subject, record))
+        return IngestResult(IngestOutcome.DUPLICATE, tuple(items)) if items else None
 
     async def _next_version(self, lab_id: int) -> int:
         latest = await self.db.files.latest_for_lab(lab_id)
@@ -191,5 +274,6 @@ class IngestService:
         warnings: Sequence[IngestWarning] = [
             *([] if has_text else [IngestWarning.NO_TEXT]),
             *([] if extraction.deadline else [IngestWarning.NO_DEADLINE]),
+            *([IngestWarning.LOW_CONFIDENCE] if extraction.confidence <= LOW_CONFIDENCE else []),
         ]
         return tuple(warnings)

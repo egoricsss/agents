@@ -2,19 +2,24 @@
 
 Формат промпта: `<Предмет>, лаба <N>[, до ДД.ММ[.ГГГГ] [ЧЧ:ММ]][, <название>]`
 (разделители — запятая, точка с запятой или перевод строки). Промпт важнее документа.
+Несколько лаб: «ЛР 3 и ЛР4», «лабы 3, 4», «ЛР 3-5» или несколько заголовков в документе.
 """
 
 import re
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import date, datetime, time, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from lab_manager.extraction import LabExtraction
 
-_NUMBER = re.compile(
-    r"(?:лабораторн\w*(?:\s+работ\w*)?|лаб\w*\.?|лр|lab)\s*(?:№|#)?\s*(\d{1,3})(?!\d)",
+_LAB_WORD = r"(?:лабораторн\w*(?:\s+работ\w*)?|лаб\w*\.?|лр|lab)\s*(?:№|#)?\s*"
+_NUM = r"\d{1,3}(?!\d|\.\d)"  # не часть даты «25.10»
+_NUMBER_LIST = re.compile(
+    rf"{_LAB_WORD}({_NUM}(?:\s*(?:,|\bи\b|\band\b|-|–|—)\s*(?:{_LAB_WORD})?{_NUM})*)",
     re.IGNORECASE,
 )
+MAX_RANGE = 10
 _DATE = re.compile(
     r"(?<![\d.])(\d{1,2})\.(\d{1,2})(?:\.(\d{4}|\d{2}))?(?![\d.])"
     r"(?:\s+(?:в\s+)?(\d{1,2}):(\d{2}))?"
@@ -37,7 +42,7 @@ def _clean(text: str) -> str:
 
 
 class RuleBasedExtractor:
-    version = "rules/v1"
+    version = "rules/v2"
 
     async def extract(
         self,
@@ -48,30 +53,61 @@ class RuleBasedExtractor:
         tz: ZoneInfo,
         known_subjects: Sequence[str] = (),
     ) -> LabExtraction:
+        labs = await self.extract_all(markdown=markdown, prompt=prompt, today=today, tz=tz)
+        return labs[0]
+
+    async def extract_all(
+        self,
+        *,
+        markdown: str,
+        prompt: str | None,
+        today: date,
+        tz: ZoneInfo,
+        known_subjects: Sequence[str] = (),
+    ) -> list[LabExtraction]:
+        """Одна или несколько лаб. Общие поля (предмет, срок) — на все; название — только одной."""
         from_prompt = self.from_prompt(prompt or "", today, tz)
         from_doc = self.from_document(markdown, today, tz)
-        merged = {key: from_prompt.get(key) or from_doc.get(key) for key in _FIELDS}
-        result = LabExtraction(**merged)
-        return result.model_copy(update={"confidence": 0.5 if result.missing_fields else 1.0})
+        numbers: list[int | None] = list(
+            from_prompt.get("numbers") or from_doc.get("numbers") or [None]
+        )
+        single = len(numbers) == 1
+        conflict = numbers_conflict(from_prompt.get("numbers"), markdown)
+        labs = []
+        for number in numbers:
+            lab = LabExtraction(
+                subject=from_prompt.get("subject"),
+                number=number,
+                title=from_prompt.get("title") or (from_doc.get("title") if single else None),
+                deadline=from_prompt.get("deadline") or from_doc.get("deadline"),
+            )
+            uncertain = bool(lab.missing_fields) or conflict
+            labs.append(lab.model_copy(update={"confidence": 0.5 if uncertain else 1.0}))
+        return labs
 
-    def from_prompt(self, prompt: str, today: date, tz: ZoneInfo) -> dict[str, object]:
-        found: dict[str, object] = {}
+    def from_prompt(self, prompt: str, today: date, tz: ZoneInfo) -> dict[str, Any]:
+        found: dict[str, Any] = {}
+        numbers: list[int] = []
+
+        def take(match: re.Match[str]) -> str:
+            numbers.extend(_parse_numbers(match[1]))
+            return " "
+
+        rest = _NUMBER_LIST.sub(take, prompt)
+        if numbers:
+            found["numbers"] = _unique(numbers)
+            found["number"] = found["numbers"][0]
         free: list[str] = []
-        for raw in _SEGMENTS.split(prompt):
+        for raw in _SEGMENTS.split(rest):
             segment = raw.strip()
             if not segment:
                 continue
-            consumed = False
-            if number := _NUMBER.search(segment):
-                found.setdefault("number", int(number[1]))
-                consumed = True
             if date_match := _DATE.search(segment):
                 deadline = _deadline(date_match, today, tz)
                 if deadline is not None:
                     found.setdefault("deadline", deadline)
-                consumed = True
-            if not consumed:
-                free.append(_clean(segment))
+                continue
+            free.append(_clean(segment))
         free = [text for text in free if text]
         if free:
             found["subject"] = free[0]
@@ -79,17 +115,18 @@ class RuleBasedExtractor:
             found["title"] = free[1]
         return found
 
-    def from_document(self, markdown: str, today: date, tz: ZoneInfo) -> dict[str, object]:
-        found: dict[str, object] = {}
+    def from_document(self, markdown: str, today: date, tz: ZoneInfo) -> dict[str, Any]:
+        found: dict[str, Any] = {}
+        if headings := heading_numbers(markdown):
+            found["numbers"] = headings
         for line in markdown.splitlines()[:HEAD_LINES]:
-            if "number" not in found and (heading := _LAB_HEADING.match(line)):
-                found["number"] = int(heading[1])
+            if "title" not in found and (heading := _LAB_HEADING.match(line)):
                 if title := _clean(heading[2]):
                     found["title"] = title
             elif "title" not in found and (topic := _TOPIC.match(line)):
                 found["title"] = _clean(topic[1])
-            if "number" not in found and (number := _NUMBER.search(line)):
-                found["number"] = int(number[1])
+            if "numbers" not in found and (mention := _NUMBER_LIST.search(line)):
+                found["numbers"] = _unique(_parse_numbers(mention[1]))
             if (
                 "deadline" not in found
                 and _DEADLINE_LINE.search(line)
@@ -97,10 +134,9 @@ class RuleBasedExtractor:
                 and (deadline := _deadline(date_match, today, tz))
             ):
                 found["deadline"] = deadline
+        if found.get("numbers"):
+            found["number"] = found["numbers"][0]
         return found
-
-
-_FIELDS = ("subject", "number", "title", "deadline")
 
 
 def _deadline(match: re.Match[str], today: date, tz: ZoneInfo) -> datetime | None:
@@ -129,8 +165,51 @@ def parse_deadline(text: str, today: date, tz: ZoneInfo) -> datetime | None:
 
 
 def heading_number(markdown: str) -> int | None:
-    """Номер из заголовка «Лабораторная работа №N» — строгий признак, его не подделать текстом."""
-    for line in markdown.splitlines()[:HEAD_LINES]:
-        if heading := _LAB_HEADING.match(line):
-            return int(heading[1])
-    return None
+    """Номер из первого заголовка «Лабораторная работа №N» (строгий признак)."""
+    headings = heading_numbers(markdown)
+    return headings[0] if headings else None
+
+
+def heading_numbers(markdown: str) -> list[int]:
+    """Номера всех заголовков «Лабораторная работа №N» в документе, по порядку, без повторов."""
+    return _unique(
+        int(heading[1]) for line in markdown.splitlines() if (heading := _LAB_HEADING.match(line))
+    )
+
+
+def mentioned_numbers(markdown: str) -> set[int]:
+    """Все номера лаб, упомянутые в тексте (заголовки и «ЛР 3», «лабы 3 и 4»)."""
+    found = set(heading_numbers(markdown))
+    for match in _NUMBER_LIST.finditer(markdown):
+        found.update(_parse_numbers(match[1]))
+    return found
+
+
+def numbers_conflict(prompt_numbers: Sequence[int] | None, markdown: str) -> bool:
+    """Владелец назвал одни номера, а текст говорит о других (подпись «ЛР 4», в посте «ЛР 3»)."""
+    mentioned = mentioned_numbers(markdown)
+    return bool(prompt_numbers and mentioned and not mentioned & set(prompt_numbers))
+
+
+def _parse_numbers(text: str) -> list[int]:
+    """«3, 4» / «3 и ЛР4» / «3-5» → [3, 4] / [3, 4] / [3, 4, 5]."""
+    tokens = re.findall(r"\d+|[-–—]", text)
+    numbers: list[int] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.isdigit():
+            if numbers and index >= 2 and tokens[index - 1] in "-–—":
+                start, end = numbers[-1], int(token)
+                if start < end <= start + MAX_RANGE:
+                    numbers.extend(range(start + 1, end + 1))
+                else:
+                    numbers.append(end)
+            else:
+                numbers.append(int(token))
+        index += 1
+    return [number for number in numbers if number >= 1]
+
+
+def _unique(numbers: Iterable[int]) -> list[int]:
+    return list(dict.fromkeys(numbers))

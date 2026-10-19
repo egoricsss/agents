@@ -46,9 +46,23 @@ class CountingExtractor:
         tz: ZoneInfo,
         known_subjects: Sequence[str] = (),
     ) -> LabExtraction:
+        labs = await self.extract_all(
+            markdown=markdown, prompt=prompt, today=today, tz=tz, known_subjects=known_subjects
+        )
+        return labs[0]
+
+    async def extract_all(
+        self,
+        *,
+        markdown: str,
+        prompt: str | None,
+        today: date,
+        tz: ZoneInfo,
+        known_subjects: Sequence[str] = (),
+    ) -> list[LabExtraction]:
         self.calls += 1
         self.known_subjects = list(known_subjects)
-        return await self._inner.extract(markdown=markdown, prompt=prompt, today=today, tz=tz)
+        return await self._inner.extract_all(markdown=markdown, prompt=prompt, today=today, tz=tz)
 
 
 @pytest.fixture
@@ -255,7 +269,7 @@ async def test_known_subjects_are_passed_to_extractor(
 
 
 class ArtifactsExtractor(CountingExtractor):
-    async def extract(
+    async def extract_all(
         self,
         *,
         markdown: str,
@@ -263,9 +277,9 @@ class ArtifactsExtractor(CountingExtractor):
         today: date,
         tz: ZoneInfo,
         known_subjects: Sequence[str] = (),
-    ) -> LabExtraction:
-        base = await super().extract(markdown=markdown, prompt=prompt, today=today, tz=tz)
-        return base.model_copy(update={"requirements": ["Программа", "Отчёт"]})
+    ) -> list[LabExtraction]:
+        labs = await super().extract_all(markdown=markdown, prompt=prompt, today=today, tz=tz)
+        return [lab.model_copy(update={"requirements": ["Программа", "Отчёт"]}) for lab in labs]
 
 
 async def test_artifacts_stored_and_prompt_build_queued_first(
@@ -286,3 +300,64 @@ async def test_artifacts_stored_and_prompt_build_queued_first(
     second = await db.jobs.claim_next()
     assert first is not None and first.kind == "build_prompt"
     assert second is not None and second.kind == "disk_sync"
+
+
+POST_TWO_LABS = "Коллеги, публикую задания на ЛР 3 и ЛР 4. Сдать до 25.10.\n"
+
+
+async def test_one_post_creates_several_labs(
+    service: IngestService, db: Database, storage: LabStorage
+) -> None:
+    result = await service.ingest_text(POST_TWO_LABS, prompt="Нейронные сети")
+
+    assert result.outcome is IngestOutcome.CREATED
+    assert [lab.number for lab in result.labs] == [3, 4]
+    assert len({item.file.id for item in result.items}) == 2
+    for lab in result.labs:
+        assert lab.folder is not None
+        assignment = storage.read_text(f"{lab.folder}/задание/assignment.md")
+        assert assignment is not None and "ЛР 3 и ЛР 4" in assignment
+    kinds = []
+    while job := await db.jobs.claim_next():
+        kinds.append((job.kind, job.payload["lab_id"]))
+    assert sorted(kinds) == sorted(
+        [(kind, lab.id) for lab in result.labs for kind in ("build_prompt", "disk_sync")]
+    )
+
+
+async def test_same_post_again_is_duplicate_for_all_labs(service: IngestService) -> None:
+    first = await service.ingest_text(POST_TWO_LABS, prompt="Нейронные сети")
+
+    again = await service.ingest_text(POST_TWO_LABS, prompt="Нейронные сети, ЛР 5")
+
+    assert again.outcome is IngestOutcome.DUPLICATE
+    assert [lab.id for lab in again.labs] == [lab.id for lab in first.labs]
+
+
+async def test_post_updates_existing_and_creates_new(service: IngestService) -> None:
+    await service.ingest_text("Задание на ЛР 3: свёрточные сети.", prompt="Нейронные сети")
+
+    result = await service.ingest_text(POST_TWO_LABS, prompt="Нейронные сети")
+
+    assert [item.outcome for item in result.items] == [
+        IngestOutcome.NEW_VERSION,
+        IngestOutcome.CREATED,
+    ]
+    assert result.outcome is IngestOutcome.CREATED
+
+
+async def test_owner_number_conflicting_with_post_is_flagged(service: IngestService) -> None:
+    post = "📎 Коллеги, публикую задание на ЛР 3.\n\nЛабораторная посвящена RL."
+
+    result = await service.ingest_text(post, prompt="Нейронные сети, ЛР 4")
+
+    assert [lab.number for lab in result.labs] == [4]
+    assert IngestWarning.LOW_CONFIDENCE in result.warnings
+
+
+async def test_needs_info_when_any_lab_lacks_fields(service: IngestService, db: Database) -> None:
+    result = await service.ingest_text(POST_TWO_LABS, prompt=None)
+
+    assert result.outcome is IngestOutcome.NEEDS_INFO
+    assert result.missing == ["subject"]
+    assert await db.labs.list() == []

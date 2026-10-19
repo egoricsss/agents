@@ -319,8 +319,17 @@ class FileRepo(_Repo):
         return self._model(row) if row else None
 
     async def get_by_sha256(self, sha256: str) -> FileRecord | None:
-        row = await self._one(f"SELECT {_FILE_COLUMNS} FROM files WHERE sha256 = ?", [sha256])  # noqa: S608
-        return self._model(row) if row else None
+        """Первая (самая ранняя) запись с таким содержимым."""
+        found = await self.list_by_sha256(sha256)
+        return found[0] if found else None
+
+    async def list_by_sha256(self, sha256: str) -> list[FileRecord]:
+        """Все лабы, в которых лежит файл с таким содержимым (один пост — несколько лаб)."""
+        rows = await self._all(
+            f"SELECT {_FILE_COLUMNS} FROM files WHERE sha256 = ? ORDER BY id",  # noqa: S608
+            [sha256],
+        )
+        return [self._model(row) for row in rows]
 
     async def add(
         self,

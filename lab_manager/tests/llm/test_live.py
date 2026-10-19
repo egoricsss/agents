@@ -14,7 +14,7 @@ from lab_manager.config import Settings
 from lab_manager.db import Database
 from lab_manager.extraction.llm import LLMExtractor
 from lab_manager.llm.gigachat import GigaChatAuthError, GigaChatClient
-from tests.fixtures import ASSIGNMENT_TEXT
+from tests.fixtures import ASSIGNMENT_TEXT, RL_POST
 
 pytestmark = pytest.mark.live
 
@@ -105,3 +105,35 @@ async def test_invalid_credentials_rejected(settings: Settings) -> None:
     ) as gigachat:
         with pytest.raises(GigaChatAuthError):
             await gigachat.chat([{"role": "user", "content": "hi"}])
+
+
+async def test_forwarded_rl_post_with_owner_number(extractor: LLMExtractor) -> None:
+    labs = await extractor.extract_all(
+        markdown=RL_POST, prompt="Нейронные сети, ЛР 4", today=TODAY, tz=MSK
+    )
+
+    assert len(labs) == 1, "этапы одной лабы не должны становиться отдельными лабами"
+    [lab] = labs
+    assert (lab.subject, lab.number) == ("Нейронные сети", 4)
+    assert lab.confidence <= 0.5  # в посте «ЛР 3» — бот должен переспросить
+    assert lab.deadline is None
+    details = " ".join([lab.title or "", lab.summary, *lab.requirements]).lower()
+    assert "подкреплен" in details or "rl" in details
+    print("\nRL post ->", lab.model_dump_json(indent=1))
+
+
+async def test_post_about_two_labs(extractor: LLMExtractor) -> None:
+    post = (
+        "Коллеги, публикую задания на ЛР 3 и ЛР 4.\n\n"
+        "ЛР 3 — свёрточные нейронные сети: классификация изображений CIFAR-10, сдать до 25.10.\n"
+        "ЛР 4 — трансформеры: дообучить BERT на задаче классификации текстов, сдать до 08.11.\n"
+        "Обе работы оформляются в Jupyter notebook."
+    )
+
+    labs = await extractor.extract_all(markdown=post, prompt="Нейронные сети", today=TODAY, tz=MSK)
+
+    assert [lab.number for lab in labs] == [3, 4]
+    assert labs[0].deadline is not None and labs[0].deadline.date() == date(2026, 10, 25)
+    assert labs[1].deadline is not None and labs[1].deadline.date() == date(2026, 11, 8)
+    assert "cifar" in " ".join([labs[0].title or "", labs[0].summary]).lower()
+    assert "bert" in " ".join([labs[1].title or "", labs[1].summary]).lower()

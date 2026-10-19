@@ -141,3 +141,72 @@ async def test_extractor_has_version_for_cache_keys() -> None:
 def test_extraction_number_must_be_positive() -> None:
     with pytest.raises(ValueError):
         LabExtraction(number=0)
+
+
+async def extract_all(prompt: str | None, markdown: str = "") -> list[LabExtraction]:
+    return await RuleBasedExtractor().extract_all(
+        markdown=markdown, prompt=prompt, today=TODAY, tz=MSK
+    )
+
+
+@pytest.mark.parametrize(
+    ("prompt", "numbers"),
+    [
+        ("Нейросети, ЛР 3 и ЛР4", [3, 4]),
+        ("Нейросети, лабы 3, 4, до 25.10", [3, 4]),
+        ("Нейросети; лр 3-5", [3, 4, 5]),
+        ("Нейросети, лабораторные 2 и 3", [2, 3]),
+        ("Нейросети, лаба 3, 25.10", [3]),  # дата без «до» — не номер
+    ],
+)
+async def test_several_numbers_in_prompt(prompt: str, numbers: list[int]) -> None:
+    labs = await extract_all(prompt)
+
+    assert [lab.number for lab in labs] == numbers
+    assert {lab.subject for lab in labs} == {"Нейросети"}
+
+
+async def test_shared_deadline_and_no_shared_title() -> None:
+    labs = await extract_all("Нейросети, лабы 3 и 4, до 25.10")
+
+    assert all(lab.deadline == datetime(2026, 10, 25, 23, 59, tzinfo=MSK) for lab in labs)
+    assert all(lab.title is None for lab in labs)
+
+
+async def test_several_headings_in_document() -> None:
+    markdown = (
+        "# Лабораторная работа №3. Свёртки\n\nСделать CNN.\n\n"
+        "# Лабораторная работа №4. Трансформеры\n\nСделать attention.\n"
+    )
+
+    labs = await extract_all("Нейросети", markdown)
+
+    assert [lab.number for lab in labs] == [3, 4]
+
+
+async def test_mention_list_in_post() -> None:
+    labs = await extract_all("Нейросети", "Коллеги, публикую задания на ЛР 3 и ЛР 4.")
+
+    assert [lab.number for lab in labs] == [3, 4]
+
+
+async def test_prompt_number_conflicting_with_post_lowers_confidence() -> None:
+    post = "📎 Коллеги, публикую задание на ЛР 3.\n\nЛабораторная посвящена RL."
+
+    [lab] = await extract_all("Нейронные сети, ЛР 4", post)
+
+    assert lab.number == 4
+    assert lab.confidence == 0.5
+
+
+async def test_matching_numbers_keep_confidence() -> None:
+    [lab] = await extract_all("Нейронные сети, ЛР 3", "Публикую задание на ЛР 3.")
+
+    assert lab.confidence == 1.0
+
+
+@pytest.mark.parametrize("bad_range", ["лр 3-99", "лр 5-3"])
+async def test_suspicious_ranges_are_not_expanded(bad_range: str) -> None:
+    labs = await extract_all(f"ОС, {bad_range}")
+
+    assert len(labs) == 2

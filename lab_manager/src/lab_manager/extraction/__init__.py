@@ -47,3 +47,15 @@ class LabExtractor(Protocol):
     ) -> LabExtraction:
         """`known_subjects` — уже существующие предметы, чтобы не плодить синонимы."""
         ...
+
+    async def extract_all(
+        self,
+        *,
+        markdown: str,
+        prompt: str | None,
+        today: date,
+        tz: ZoneInfo,
+        known_subjects: Sequence[str] = (),
+    ) -> list[LabExtraction]:
+        """Все лабы из сообщения (одна или несколько), не пустой список."""
+        ...

@@ -1,8 +1,15 @@
 """LLM-экстрактор (GigaChat) поверх правил.
 
 Гибрид: явные поля из промпта владельца — правилами (детерминированно), остальное — LLM
-через принудительный вызов функции `save_lab` с проверкой pydantic-схемой. Год срока LLM
-не доверяем — модель не знает текущую дату, — дату берём «как написано» и досчитываем кодом.
+через принудительный вызов функции `save_labs` с проверкой pydantic-схемой. Одно сообщение
+может описывать несколько лаб — модель возвращает массив, детали у каждой свои.
+
+Защиты:
+- год срока досчитывает код (модель не знает текущую дату) — дата берётся «как написано»;
+- номера: подпись владельца > заголовки документа > ответ модели; номер, которого нет ни в
+  подписи, ни в тексте, или расхождение подписи с текстом снижают уверенность (бот переспросит);
+- документ — данные в `<document>`, с напоминанием до и после, закрывающий тег экранируется.
+
 Невалидный ответ отправляется модели обратно с текстом ошибки; если не помогло или API
 недоступен — результат правил с пониженной уверенностью. Ответы кешируются в БД.
 """
@@ -10,6 +17,7 @@
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Sequence
 from datetime import date
@@ -21,57 +29,74 @@ from pydantic import BaseModel, Field, ValidationError
 
 from lab_manager.db import Database
 from lab_manager.extraction import LabExtraction
-from lab_manager.extraction.rules import RuleBasedExtractor, heading_number, parse_deadline
+from lab_manager.extraction.rules import (
+    RuleBasedExtractor,
+    heading_numbers,
+    mentioned_numbers,
+    numbers_conflict,
+    parse_deadline,
+)
 from lab_manager.llm.gigachat import ChatResult, GigaChatClient, GigaChatError
 from lab_manager.prompts import escape_closing_tag
 
 log = logging.getLogger(__name__)
 
-PROMPT_VERSION = "extract_lab/v3"
+PROMPT_VERSION = "extract_lab/v6"
 PURPOSE = "extract_lab"
-FUNCTION_NAME = "save_lab"
+FUNCTION_NAME = "save_labs"
+MAX_LABS = 10
 FALLBACK_CONFIDENCE = 0.4
 CONFLICT_CONFIDENCE = 0.5  # расхождение с документом — повод спросить владельца
 SYSTEM_PROMPT = files("lab_manager.prompts").joinpath("extract_lab.md").read_text("utf-8")
 
-SAVE_LAB = {
+_LAB_ITEM = {
+    "type": "object",
+    "properties": {
+        "subject": {"type": "string", "description": "Предмет; пусто, если неизвестен"},
+        "number": {"type": "integer", "description": "Номер лабы; 0, если неизвестен"},
+        "title": {
+            "type": "string",
+            "description": "Тема работы в 2–6 словах по сути задания (например, «Сортировка"
+            " слиянием», «Индексы в PostgreSQL»). Не «Лабораторная работа N»",
+        },
+        "deadline_date": {
+            "type": "string",
+            "description": "Срок как в тексте: ДД.ММ или ДД.ММ.ГГГГ; пусто, если нет",
+        },
+        "deadline_time": {"type": "string", "description": "Время ЧЧ:ММ; пусто, если нет"},
+        "summary": {"type": "string", "description": "1–3 предложения: что сделать в этой лабе"},
+        "requirements": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Артефакты и требования к сдаче этой лабы",
+        },
+        "confidence": {"type": "number", "description": "Уверенность 0..1"},
+    },
+    "required": [
+        "subject",
+        "number",
+        "title",
+        "deadline_date",
+        "deadline_time",
+        "summary",
+        "requirements",
+        "confidence",
+    ],
+}
+
+SAVE_LABS = {
     "name": FUNCTION_NAME,
-    "description": "Сохранить извлечённые поля лабораторной работы",
+    "description": "Сохранить лабораторные работы из сообщения: по элементу на каждую лабу",
     "parameters": {
         "type": "object",
-        "properties": {
-            "subject": {"type": "string", "description": "Предмет; пусто, если неизвестен"},
-            "number": {"type": "integer", "description": "Номер лабы; 0, если неизвестен"},
-            "title": {"type": "string", "description": "Тема работы; пусто, если нет"},
-            "deadline_date": {
-                "type": "string",
-                "description": "Срок как в тексте: ДД.ММ или ДД.ММ.ГГГГ; пусто, если нет",
-            },
-            "deadline_time": {"type": "string", "description": "Время ЧЧ:ММ; пусто, если нет"},
-            "summary": {"type": "string", "description": "1–3 предложения: что сделать"},
-            "requirements": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Артефакты и требования к сдаче",
-            },
-            "confidence": {"type": "number", "description": "Уверенность 0..1"},
-        },
-        "required": [
-            "subject",
-            "number",
-            "title",
-            "deadline_date",
-            "deadline_time",
-            "summary",
-            "requirements",
-            "confidence",
-        ],
+        "properties": {"labs": {"type": "array", "items": _LAB_ITEM}},
+        "required": ["labs"],
     },
 }
 
 
 class LLMLabFields(BaseModel):
-    """Схема аргументов `save_lab`: строгая проверка ответа модели."""
+    """Одна лаба из ответа модели: строгая проверка."""
 
     subject: str = ""
     number: int = Field(default=0, ge=0, le=999)
@@ -81,6 +106,10 @@ class LLMLabFields(BaseModel):
     summary: str = Field(default="", max_length=2000)
     requirements: list[str] = Field(default_factory=list, max_length=30)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class LLMLabsAnswer(BaseModel):
+    labs: list[LLMLabFields] = Field(min_length=1, max_length=MAX_LABS)
 
 
 class LLMExtractor:
@@ -114,75 +143,126 @@ class LLMExtractor:
         tz: ZoneInfo,
         known_subjects: Sequence[str] = (),
     ) -> LabExtraction:
-        fields = await self._fields(markdown, prompt, known_subjects)
-        if fields is None:
-            fallback = await self.rules.extract(
+        labs = await self.extract_all(
+            markdown=markdown, prompt=prompt, today=today, tz=tz, known_subjects=known_subjects
+        )
+        return labs[0]
+
+    async def extract_all(
+        self,
+        *,
+        markdown: str,
+        prompt: str | None,
+        today: date,
+        tz: ZoneInfo,
+        known_subjects: Sequence[str] = (),
+    ) -> list[LabExtraction]:
+        answer = await self._answer(markdown, prompt, known_subjects)
+        if answer is None:
+            fallback = await self.rules.extract_all(
                 markdown=markdown, prompt=prompt, today=today, tz=tz
             )
-            return fallback.model_copy(
-                update={"confidence": min(fallback.confidence, FALLBACK_CONFIDENCE)}
-            )
-        return self._merge(fields, markdown, prompt, today, tz, known_subjects)
+            return [
+                lab.model_copy(update={"confidence": min(lab.confidence, FALLBACK_CONFIDENCE)})
+                for lab in fallback
+            ]
+        return self._merge(answer.labs, markdown, prompt, today, tz, known_subjects)
 
     def _merge(
         self,
-        fields: LLMLabFields,
+        items: list[LLMLabFields],
         markdown: str,
         prompt: str | None,
         today: date,
         tz: ZoneInfo,
         known_subjects: Sequence[str],
-    ) -> LabExtraction:
-        """Приоритет: явный промпт > заголовок документа (номер) > LLM > прочий документ.
-
-        Номер из заголовка «Лабораторная работа №N» важнее ответа модели: так внедрённая в
-        документ команда («поставь номер 999») не меняет номер, а расхождение снижает уверенность.
-        """
+    ) -> list[LabExtraction]:
+        """Сопоставляет ответ модели с номерами, которым доверяем больше, и сливает поля."""
         from_prompt = self.rules.from_prompt(prompt or "", today, tz)
         from_doc = self.rules.from_document(markdown, today, tz)
-        heading = heading_number(markdown)
-        confidence = fields.confidence
-        if heading is not None:
-            if fields.number and fields.number != heading:
-                confidence = min(confidence, CONFLICT_CONFIDENCE)
-            from_doc = from_doc | {"number": heading}
-            fields = fields.model_copy(update={"number": 0})
+        prompt_numbers: list[int] = from_prompt.get("numbers") or []
+        trusted = prompt_numbers or heading_numbers(markdown)
+        mentioned = mentioned_numbers(markdown) | set(prompt_numbers)
+        conflict = numbers_conflict(prompt_numbers, markdown)
+
+        pairs: list[tuple[int | None, LLMLabFields | None, bool]]  # номер, ответ, сомнение
+        if trusted:
+            pairs = _match(trusted, items)
+        else:
+            pairs = [
+                (item.number or None, item, bool(item.number) and item.number not in mentioned)
+                for item in items
+            ]
+
+        single = len(pairs) == 1
+        labs = []
+        for number, fields, doubtful in pairs:
+            lab = self._merge_one(
+                number,
+                fields,
+                from_prompt=from_prompt,
+                from_doc=from_doc if single else {},
+                today=today,
+                tz=tz,
+                known_subjects=known_subjects,
+            )
+            if conflict or doubtful:
+                lab = lab.model_copy(
+                    update={"confidence": min(lab.confidence, CONFLICT_CONFIDENCE)}
+                )
+            labs.append(lab)
+        return labs
+
+    def _merge_one(
+        self,
+        number: int | None,
+        fields: LLMLabFields | None,
+        *,
+        from_prompt: dict[str, Any],
+        from_doc: dict[str, Any],
+        today: date,
+        tz: ZoneInfo,
+        known_subjects: Sequence[str],
+    ) -> LabExtraction:
+        """Приоритет полей: явный промпт > LLM > документ (правила)."""
+        fields = fields or LLMLabFields(confidence=FALLBACK_CONFIDENCE)
         when = f"{fields.deadline_date} {fields.deadline_time}".strip()
         llm: dict[str, Any] = {
-            "number": fields.number or None,
-            "title": fields.title.strip() or None,
+            "title": _meaningful_title(fields.title),
             "deadline": parse_deadline(when, today, tz) if fields.deadline_date else None,
         }
-        merged = {
-            key: from_prompt.get(key) or llm.get(key) or from_doc.get(key)
-            for key in ("number", "title", "deadline")
-        }
+        title, deadline = (
+            from_prompt.get(key) or llm.get(key) or from_doc.get(key)
+            for key in ("title", "deadline")
+        )
         return LabExtraction(
             subject=_pick_subject(
                 prompt_subject=from_prompt.get("subject"),
                 llm_subject=fields.subject.strip() or None,
                 known_subjects=known_subjects,
             ),
+            number=number,
+            title=title,
+            deadline=deadline,
             summary=fields.summary.strip(),
             requirements=[item.strip() for item in fields.requirements if item.strip()],
-            confidence=confidence,
-            **merged,
+            confidence=fields.confidence,
         )
 
-    async def _fields(
+    async def _answer(
         self, markdown: str, prompt: str | None, known_subjects: Sequence[str]
-    ) -> LLMLabFields | None:
+    ) -> LLMLabsAnswer | None:
         key = _cache_key(self.version, markdown, prompt, known_subjects)
         if (cached := await self.db.llm.get_cached(key)) is not None:
-            return LLMLabFields.model_validate(cached)
-        fields = await self._ask(markdown, prompt, known_subjects)
-        if fields is not None:
-            await self.db.llm.put_cached(key, PURPOSE, fields.model_dump())
-        return fields
+            return LLMLabsAnswer.model_validate(cached)
+        answer = await self._ask(markdown, prompt, known_subjects)
+        if answer is not None:
+            await self.db.llm.put_cached(key, PURPOSE, answer.model_dump())
+        return answer
 
     async def _ask(
         self, markdown: str, prompt: str | None, known_subjects: Sequence[str]
-    ) -> LLMLabFields | None:
+    ) -> LLMLabsAnswer | None:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": self._user_message(markdown, prompt, known_subjects)},
@@ -192,7 +272,7 @@ class LLMExtractor:
             try:
                 result = await self.client.chat(
                     messages,
-                    functions=[SAVE_LAB],
+                    functions=[SAVE_LABS],
                     function_call=FUNCTION_NAME,
                     temperature=self.temperature,
                 )
@@ -209,7 +289,7 @@ class LLMExtractor:
                 ]
                 continue
             try:
-                fields = LLMLabFields.model_validate(result.function_call.arguments)
+                answer = LLMLabsAnswer.model_validate(result.function_call.arguments)
             except ValidationError as exc:
                 await self._record(started, result, error="invalid arguments")
                 messages += [
@@ -231,7 +311,7 @@ class LLMExtractor:
                 ]
                 continue
             await self._record(started, result)
-            return fields
+            return answer
         return None
 
     def _user_message(
@@ -262,6 +342,43 @@ class LLMExtractor:
             completion_tokens=result.usage.completion_tokens if result else 0,
             error=error,
         )
+
+
+def _match(
+    trusted: list[int], items: list[LLMLabFields]
+) -> list[tuple[int | None, LLMLabFields | None, bool]]:
+    """Номерам, которым доверяем, подбирает ответы модели: по номеру, иначе по порядку.
+
+    Подбор не по номеру — признак расхождения (например, внедрённый «номер 999»), поэтому
+    такая пара помечается как сомнительная.
+    """
+    by_number = {item.number: item for item in items if item.number}
+    unused = [item for item in items if item.number not in trusted]
+    pairs: list[tuple[int | None, LLMLabFields | None, bool]] = []
+    for number in trusted:
+        if number in by_number:
+            pairs.append((number, by_number[number], False))
+        elif unused:
+            fallback = unused.pop(0)
+            pairs.append((number, fallback, bool(fallback.number)))
+        else:
+            pairs.append((number, None, False))
+    return pairs
+
+
+_LAB_PREFIX = re.compile(
+    # «Лабораторная работа [№N]» или короткая форма строго с номером: «ЛР 4», «Лаба №2».
+    # Без номера «лаб…» не трогаем — это может быть «Лабиринты на графах».
+    r"^(?:лабораторн\w*(?:\s+работ\w*)?\s*(?:№|#)?\s*\d*|(?:лаб\w*\.?|лр|lab)\s*(?:№|#)?\s*\d+)"
+    r"\s*(?:[.:—–-]\s*|\s|$)",
+    re.IGNORECASE,
+)
+
+
+def _meaningful_title(title: str) -> str | None:
+    """«Лабораторная работа 4. Свёртки» → «Свёртки»; «Лабораторная работа 4» — не тема."""
+    clean = _LAB_PREFIX.sub("", title.strip(), count=1).strip(" .:—–-")
+    return clean or None
 
 
 def _pick_subject(

@@ -52,13 +52,23 @@ async def test_lookup_by_sha256(db: Database) -> None:
     assert await db.files.get_by_sha256(sha("unknown")) is None
 
 
-async def test_same_content_cannot_be_added_twice(db: Database) -> None:
+async def test_same_content_cannot_be_added_twice_to_one_lab(db: Database) -> None:
     lab = await make_lab(db)
-    other = await make_lab(db, number=2)
     await add(db, lab, "content")
 
     with pytest.raises(AlreadyExistsError):
-        await add(db, other, "content", name="copy.pdf")
+        await add(db, lab, "content", name="copy.pdf")
+
+
+async def test_same_content_can_belong_to_several_labs(db: Database) -> None:
+    lab3 = await make_lab(db, number=3)
+    lab4 = await make_lab(db, number=4)
+
+    first = await add(db, lab3, "post about labs 3 and 4")
+    second = await add(db, lab4, "post about labs 3 and 4")
+
+    assert await db.files.list_by_sha256(first.sha256) == [first, second]
+    assert await db.files.get_by_sha256(first.sha256) == first
 
 
 @pytest.mark.parametrize("bad", ["", "abc", "Z" * 64, sha("x").upper()])
