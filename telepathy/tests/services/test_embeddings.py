@@ -15,6 +15,7 @@ from telepathy.services.embeddings import (
     QUERY_PREFIX,
     E5OnnxEncoder,
     OnnxEmbedder,
+    _build_onnx,
 )
 
 
@@ -206,3 +207,20 @@ async def test_real_model_ranks_paraphrase_above_unrelated() -> None:
 
     assert pizza.shape == (384,)
     assert float(pizza @ paraphrase) > float(pizza @ unrelated)
+
+
+def test_onnxruntime_telemetry_disabled_before_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ONNX Runtime по умолчанию шлёт телеметрию в Microsoft — сетевая политика это запрещает.
+    import onnxruntime
+    import sentencepiece
+
+    calls: list[str] = []
+    monkeypatch.setattr(onnxruntime, "disable_telemetry_events", lambda: calls.append("off"))
+    monkeypatch.setattr(
+        onnxruntime, "InferenceSession", lambda *a, **k: calls.append("session") or FakeSession()
+    )
+    monkeypatch.setattr(sentencepiece, "SentencePieceProcessor", lambda **k: FakeSentencePiece({}))
+
+    _build_onnx("tok.model", "model.onnx", 1)
+
+    assert calls == ["off", "session"]

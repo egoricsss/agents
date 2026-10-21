@@ -86,6 +86,9 @@ def _build_onnx(tokenizer_path: str, model_path: str, threads: int) -> Encoder:
     import onnxruntime as ort
     import sentencepiece as spm
 
+    # По умолчанию ONNX Runtime шлёт телеметрию в Microsoft (замечено соединение на :443),
+    # а сетевая политика сервера разрешает только Telegram, LLM и Hugging Face.
+    ort.disable_telemetry_events()
     options = ort.SessionOptions()
     options.intra_op_num_threads = threads
     options.inter_op_num_threads = 1
