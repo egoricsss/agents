@@ -1,0 +1,11 @@
+# любые env-файлы и их бэкапы (nano: .env.save), кроме шаблона
+.env
+.env*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+# данные приложения (SQLite, кеш модели) — только в корне проекта
+/data/
