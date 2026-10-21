@@ -1,7 +1,5 @@
 # Запуск: docker compose up -d --build   (из папки проекта, rootless Docker)
 # Входящих портов нет: Telegram работает через polling.
-# Сеть agents создаёт проект telepathy (docker compose up в ~/projects/telepathy) —
-# поднимите его первым; по ней шлюз пересылает апдейты «Телепатии» на telepathy:9010.
 
 services:
   lab_manager:
@@ -18,9 +16,6 @@ services:
       - lab_data:/data
       # Корневой сертификат Минцифры для TLS к GigaChat — только чтение.
       - ${GIGACHAT_CA_HOST_FILE:-/home/agent/certs/Russian_Trusted_Root_CA.cer}:/certs/russian_trusted_root_ca.pem:ro
-    networks:
-      - default
-      - agents
     mem_limit: 640m
     cpus: 0.75
     read_only: true
@@ -44,8 +39,3 @@ services:
 
 volumes:
   lab_data:
-
-networks:
-  agents:
-    external: true
-    name: agents

@@ -1,6 +1,5 @@
 # Запуск: docker compose up -d --build   (из папки проекта, rootless Docker)
-# Портов наружу нет: в режиме polling бот сам опрашивает Telegram, в режиме gateway
-# шлюз lab_manager шлёт апдейты на telepathy:9010 внутри docker-сети «agents».
+# Портов наружу нет: бот сам опрашивает Telegram (TELEGRAM_MODE=polling).
 
 services:
   telepathy:
@@ -10,11 +9,13 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
+      # Пути внутри контейнера важнее значений из .env.
       DATA_DIR: /data
+      GIGACHAT_CA_BUNDLE_FILE: /certs/russian_trusted_root_ca.pem
     volumes:
       - telepathy_data:/data
-    networks:
-      - agents
+      # Корневой сертификат Минцифры для TLS к GigaChat — только чтение.
+      - ${GIGACHAT_CA_HOST_FILE:-/home/agent/certs/Russian_Trusted_Root_CA.cer}:/certs/russian_trusted_root_ca.pem:ro
     # Модель e5-small в fp32 + torch ≈ 0.8 ГБ RSS. Лимит — чтобы при перерасходе
     # OOM убил только этот контейнер, а не lab_manager.
     mem_limit: 1g
@@ -41,8 +42,3 @@ services:
 
 volumes:
   telepathy_data:
-
-networks:
-  # Общая сеть агентов: lab_manager подключается к ней как к external.
-  agents:
-    name: agents

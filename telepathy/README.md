@@ -27,7 +27,7 @@ Telegram-бот «Телепатия» для пары. Двое независ�
 
 ```bash
 cd ~/projects/telepathy
-cp .env.example .env && chmod 600 .env   # заполнить TELEGRAM_BOT_TOKEN и LLM_API_KEY
+cp .env.example .env && chmod 600 .env   # токен бота, ALLOWED_USER_IDS, ключ LLM
 docker compose up -d --build             # сборка и запуск
 docker compose ps                        # статус и healthcheck
 docker compose logs -f telepathy         # логи
@@ -38,6 +38,8 @@ docker compose down                      # остановить (данные о
   `telepathy_telepathy_data` (`/data/models`); дальше она грузится из тома без сети.
 - Данные (SQLite) — в том же томе, `/data/telepathy.db`.
 - Секреты — только через `env_file: .env`, в образ не попадают (`.dockerignore`).
+- Сертификат Минцифры для GigaChat монтируется только для чтения; путь на хосте —
+  `GIGACHAT_CA_HOST_FILE` (по умолчанию `/home/agent/certs/Russian_Trusted_Root_CA.cer`).
 - Лимиты: 1 ГБ памяти, 0.75 CPU; корневая ФС только для чтения, `cap_drop: ALL`,
   `no-new-privileges`; `restart: unless-stopped`; healthcheck — `python -m telepathy.health`
   (свежесть файла-пульса, без импорта torch).
@@ -47,15 +49,23 @@ docker compose down                      # остановить (данные о
 
 | `TELEGRAM_MODE` | Как получает апдейты | Когда |
 |---|---|---|
-| `polling` (по умолчанию) | сам опрашивает Telegram (long polling) | отдельный бот со своим токеном |
-| `gateway` | шлюз [lab_manager](../lab_manager/) шлёт апдейты POST-ом на `telepathy:9010/telegram/update` в docker-сети `agents` | общий бот владельца |
+| `polling` (по умолчанию, так и развёрнуто) | сам опрашивает Telegram (long polling) | отдельный бот со своим токеном — сейчас @cherryegoricbot |
+| `gateway` | шлюз [lab_manager](../lab_manager/) шлёт апдейты POST-ом на `telepathy:9010/telegram/update` | если «Телепатию» захочется вернуть в общий бот |
 
 В режиме `gateway` токен тот же, что у общего бота: опрашивает Telegram только шлюз, а отвечает
-«Телепатия» сама через Bot API. Шлюз и «Телепатия» проверяют общий секрет
-(`GATEWAY_SECRET` здесь = `TELEPATHY_SECRET` в `lab_manager/.env`, заголовок
-`X-Telegram-Bot-Api-Secret-Token`). Кто имеет доступ, решает шлюз: владельцу — всё,
-гостям из `TELEPATHY_USERS` — только «Телепатия». Сеть `agents` создаёт этот compose-проект,
-поэтому его надо поднять раньше lab_manager.
+«Телепатия» сама через Bot API; шлюз и «Телепатия» сверяют общий секрет (`GATEWAY_SECRET` здесь =
+`TELEPATHY_SECRET` в `lab_manager/.env`). Для этого режима нужна общая docker-сеть с lab_manager.
+
+### LLM-судья: DeepSeek и GigaChat
+
+- `LLM_MODEL=deepseek:deepseek-chat` + `LLM_API_KEY` — основной судья DeepSeek; если задан ещё
+  и `GIGACHAT_CREDENTIALS`, GigaChat — запасной: отвечает при любой ошибке DeepSeek.
+- `LLM_MODEL=gigachat:GigaChat-2` — только GigaChat.
+- Нет ключа DeepSeek, но есть GigaChat — судит GigaChat. Не настроено ничего — судья
+  отключён (ошибка в логе), мысли принимаются, совпадений нет.
+
+GigaChat использует свой протокол `functions`, поэтому подключён через `FunctionModel`-адаптер
+(`llm/`, перенесён из lab_manager вместе с тестами на фейковом сервере).
 
 ## Переменные окружения
 
@@ -72,6 +82,9 @@ docker compose down                      # остановить (данные о
 | `LLM_API_KEY` | — | ключ провайдера LLM |
 | `LLM_BASE_URL` | — | адрес OpenAI-совместимого API (с `LLM_MODEL=openai-chat:<модель>`) |
 | `LLM_TIMEOUT_SECONDS` | `30` | таймаут запроса к судье |
+| `GIGACHAT_CREDENTIALS` | — | ключ авторизации GigaChat (основной или запасной судья) |
+| `GIGACHAT_SCOPE` / `GIGACHAT_MODEL` | `GIGACHAT_API_PERS` / `GigaChat-2` | scope и модель GigaChat |
+| `GIGACHAT_CA_BUNDLE_FILE` | — | сертификат Минцифры (PEM), в Docker монтируется сам |
 | `EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | модель sentence-transformers |
 | `EMBEDDING_THREADS` | `1` | потоков torch |
 | `MATCH_WINDOW_HOURS` | `24` | окно поиска кандидатов |
@@ -101,6 +114,7 @@ src/telepathy/
   bot/               хендлеры aiogram, тексты, приём апдейтов от шлюза
   services/          pairing, matching, scoring, embeddings, judge, stats
   db/                модели SQLAlchemy 2 (async), sqlite-vec, репозитории
+  llm/               клиент GigaChat и адаптер для PydanticAI
   health.py          healthcheck без тяжёлых импортов
 ```
 

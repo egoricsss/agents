@@ -18,7 +18,8 @@
 
 Telegram-бот «Телепатия» для пары (ТЗ владельца от 2026-10-21, см. README.md): мысли партнёров,
 локальные эмбеддинги e5-small, LLM-судья на PydanticAI (по умолчанию DeepSeek), SQLite + sqlite-vec.
-Работает в общем боте владельца за шлюзом lab_manager (режим `gateway`) или отдельно (`polling`).
+Развёрнут отдельным ботом @cherryegoricbot (`polling`) для владельца и его девушки
+(ALLOWED_USER_IDS); режим `gateway` за шлюзом lab_manager оставлен про запас.
 
 Ресурсы VPS малы (≈2 ГБ RAM, 1 CPU): только CPU-сборка torch, один поток, `mem_limit`,
 после сборок — `docker builder prune --keep-storage 3GB`.
