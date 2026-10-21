@@ -28,7 +28,7 @@ from telepathy.config import Settings
 from telepathy.db import Database
 from telepathy.health import HEARTBEAT_FILE
 from telepathy.services.embeddings import SentenceEmbedder
-from telepathy.services.judge import Judge, build_model
+from telepathy.services.judge import create_judge
 from telepathy.services.matching import MatchingConfig, MatchingService
 from telepathy.services.pairing import PairingService
 from telepathy.services.stats import StatsService
@@ -74,10 +74,10 @@ async def run(settings: Settings) -> None:
             threads=settings.embedding_threads,
             cache_folder=settings.data_dir / "models",
         )
-        judge = Judge(
-            build_model(
-                settings.llm_model, api_key=settings.llm_api_key, base_url=settings.llm_base_url
-            ),
+        judge = create_judge(
+            settings.llm_model,
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_base_url,
             timeout=settings.llm_timeout_seconds,
         )
         dp = create_dispatcher(

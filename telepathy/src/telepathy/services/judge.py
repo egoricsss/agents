@@ -92,3 +92,31 @@ class Judge:
             verdict = verdict.model_copy(update={"message": DEFAULT_MESSAGE})
         log.info("judge verdict is_same=%s (%s tokens)", verdict.is_same, result.usage.total_tokens)
         return verdict
+
+
+class DisabledJudge:
+    """Судья без LLM (не задан ключ или модель): мысли принимаются, совпадений нет."""
+
+    async def compare(self, first: str, second: str) -> Match | None:
+        log.warning("judge is disabled, match check skipped")
+        return None
+
+
+def create_judge(
+    model: str,
+    *,
+    api_key: SecretStr | None = None,
+    base_url: str | None = None,
+    timeout: float = 30.0,
+) -> Judge | DisabledJudge:
+    """Судья по настройкам; ошибка конфигурации LLM не должна ронять бота."""
+    try:
+        return Judge(build_model(model, api_key=api_key, base_url=base_url), timeout=timeout)
+    except Exception as exc:
+        log.error(
+            "LLM judge %s is not configured (check LLM_API_KEY / LLM_MODEL): %s: %s",
+            model,
+            type(exc).__name__,
+            exc,
+        )
+        return DisabledJudge()
