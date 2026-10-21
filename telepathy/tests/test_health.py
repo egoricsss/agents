@@ -28,7 +28,7 @@ def test_healthcheck_does_not_import_heavy_modules(tmp_path: Path) -> None:
             "    runpy.run_module('telepathy.health', run_name='__main__')",
             "except SystemExit as exc:",
             "    status = exc.code",
-            "heavy = [m for m in ('torch', 'pydantic_ai', 'aiogram') if m in sys.modules]",
+            "heavy = [m for m in ('onnxruntime', 'pydantic_ai', 'aiogram') if m in sys.modules]",
             "print(status, heavy)",
         ]
     )

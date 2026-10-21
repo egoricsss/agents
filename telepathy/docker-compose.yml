@@ -16,9 +16,9 @@ services:
       - telepathy_data:/data
       # Корневой сертификат Минцифры для TLS к GigaChat — только чтение.
       - ${GIGACHAT_CA_HOST_FILE:-/home/agent/certs/Russian_Trusted_Root_CA.cer}:/certs/russian_trusted_root_ca.pem:ro
-    # Модель e5-small в fp32 + torch ≈ 0.8 ГБ RSS. Лимит — чтобы при перерасходе
-    # OOM убил только этот контейнер, а не lab_manager.
-    mem_limit: 1g
+    # Замер процесса: ~450 МБ (aiogram ~150, SentencePiece ~60, ONNX-модель ~140), пик ~480.
+    # Лимит — чтобы при перерасходе OOM убил только этот контейнер.
+    mem_limit: 600m
     cpus: 0.75
     read_only: true
     tmpfs:
@@ -32,7 +32,7 @@ services:
       interval: 60s
       timeout: 10s
       retries: 3
-      # Первый запуск скачивает модель (~470 МБ).
+      # Первый запуск скачивает модель (~120 МБ).
       start_period: 300s
     logging:
       driver: json-file

@@ -28,7 +28,7 @@ from telepathy.config import Settings
 from telepathy.db import Database
 from telepathy.health import HEARTBEAT_FILE
 from telepathy.llm.gigachat import GigaChatClient
-from telepathy.services.embeddings import SentenceEmbedder
+from telepathy.services.embeddings import OnnxEmbedder
 from telepathy.services.judge import gigachat_model_name, judge_from_settings
 from telepathy.services.matching import MatchingConfig, MatchingService
 from telepathy.services.pairing import PairingService
@@ -71,8 +71,9 @@ async def run(settings: Settings) -> None:
     gigachat: GigaChatClient | None = None
     try:
         # Модель грузится один раз, до приёма сообщений; цикл событий при этом свободен.
-        embedder = await SentenceEmbedder.load(
+        embedder = await OnnxEmbedder.load(
             settings.embedding_model,
+            onnx_file=settings.embedding_onnx_file,
             threads=settings.embedding_threads,
             cache_folder=settings.data_dir / "models",
         )

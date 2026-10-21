@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
-# Образ telepathy: зависимости ставит uv в отдельной стадии (torch — CPU-сборка из
-# download.pytorch.org), секретов и модели в образе нет: секреты приходят через env_file,
-# модель эмбеддингов скачивается при первом запуске в том /data и дальше берётся оттуда.
+# Образ telepathy: зависимости ставит uv в отдельной стадии (без torch: эмбеддинги на
+# ONNX Runtime), секретов и модели в образе нет: секреты приходят через env_file,
+# квантованная модель эмбеддингов (~120 МБ) скачивается при первом запуске в том /data.
 
 FROM python:3.12-slim AS builder
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never

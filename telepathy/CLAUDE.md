@@ -17,11 +17,12 @@
 ## Задача
 
 Telegram-бот «Телепатия» для пары (ТЗ владельца от 2026-10-21, см. README.md): мысли партнёров,
-локальные эмбеддинги e5-small, LLM-судья на PydanticAI (по умолчанию DeepSeek), SQLite + sqlite-vec.
+локальные эмбеддинги e5-small (int8 ONNX, без torch), LLM-судья на PydanticAI (по умолчанию DeepSeek), SQLite + sqlite-vec.
 Развёрнут отдельным ботом @cherryegoricbot (`polling`) для владельца и его девушки
 (ALLOWED_USER_IDS); режим `gateway` за шлюзом lab_manager оставлен про запас.
 
-Ресурсы VPS малы (≈2 ГБ RAM, 1 CPU): только CPU-сборка torch, один поток, `mem_limit`,
+Ресурсы VPS малы (≈2 ГБ RAM, 1 CPU): никакого torch, один поток, `mem_limit`, замер RAM
+и согласование с владельцем до запуска,
 после сборок — `docker builder prune --keep-storage 3GB`.
 
 ## Стек и стиль

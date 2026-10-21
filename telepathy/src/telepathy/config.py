@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     gigachat_ca_bundle_file: FilePath | None = None
 
     embedding_model: str = "intfloat/multilingual-e5-small"
+    # Квантованная (int8) ONNX-версия из того же репозитория: ~0.4 ГБ RAM на процесс вместо ~0.8.
+    embedding_onnx_file: str = "onnx/model_qint8_avx512_vnni.onnx"
     embedding_threads: int = Field(1, ge=1)
 
     match_window_hours: float = Field(24.0, gt=0)
