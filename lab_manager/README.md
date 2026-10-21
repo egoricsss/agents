@@ -34,6 +34,23 @@ docker compose down                      # остановить (данные о
 
 Одновременно должен работать только один экземпляр бота (один токен = один polling).
 
+### Общий бот и «Телепатия»
+
+Бот — общий фронтенд для агентов владельца. Кроме лаб в нём живёт агент «Телепатия»
+([../telepathy](../telepathy/)) — отдельный контейнер в docker-сети `agents`. Шлюз сам опрашивает
+Telegram и пересылает апдейты «Телепатии» на `TELEPATHY_URL` (POST в формате вебхука, общий
+секрет `TELEPATHY_SECRET` в заголовке `X-Telegram-Bot-Api-Secret-Token`); отвечает «Телепатия»
+сама, тем же токеном.
+
+- Владельцу доступны все агенты: команды `/pair`, `/join`, `/stats` уходят «Телепатии», кнопка
+  **🔮 Телепатия** или `/agent telepathy` делает её получателем сообщений без команды, кнопки
+  **📚 Лабы** / **📅 Неделя** и `/agent lab` возвращают к лабам.
+- Гостям из `TELEPATHY_USERS` доступна только «Телепатия»: шлюз пересылает ей все их апдейты,
+  лабы им не видны. У гостя своё меню команд (`BotCommandScopeChat`).
+- Порядок запуска: сначала `docker compose up -d --build` в `../telepathy` (создаёт сеть
+  `agents`), затем здесь.
+- Если «Телепатия» не отвечает, шлюз сообщает пользователю «сейчас недоступен», лабы работают.
+
 ## Быстрый старт (разработка)
 
 ```bash
@@ -51,7 +68,7 @@ uv run ruff check . && uv run ruff format --check .
 | Переменная | Обязательна | По умолчанию | Назначение |
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | да | — | токен бота |
-| `TELEGRAM_OWNER_ID` | да | — | Telegram ID владельца (единственный пользователь) |
+| `TELEGRAM_OWNER_ID` | да | — | Telegram ID владельца (ему доступны все агенты) |
 | `YANDEX_DISK_TOKEN` | да | — | OAuth-токен Яндекс Диска |
 | `YANDEX_DISK_ROOT` | нет | `disk:/Лабы` | корневая папка на Диске |
 | `GIGACHAT_CREDENTIALS` | да | — | ключ авторизации GigaChat |
@@ -59,6 +76,9 @@ uv run ruff check . && uv run ruff format --check .
 | `GIGACHAT_MODEL` | нет | `GigaChat-2` | модель |
 | `GIGACHAT_CA_HOST_FILE` | для Docker | `/home/agent/certs/Russian_Trusted_Root_CA.cer` | путь к сертификату на хосте (монтируется в контейнер) |
 | `GIGACHAT_CA_BUNDLE_FILE` | для GigaChat | — | путь к корневому сертификату Минцифры (PEM) |
+| `TELEPATHY_URL` | нет | — | адрес «Телепатии» в docker-сети, напр. `http://telepathy:9010` |
+| `TELEPATHY_SECRET` | с `TELEPATHY_URL` | — | общий секрет с telepathy (`GATEWAY_SECRET` там) |
+| `TELEPATHY_USERS` | нет | — | Telegram ID гостей через запятую: им доступна только «Телепатия» |
 | `TZ` | нет | `Europe/Moscow` | часовой пояс для дедлайнов |
 | `DATA_DIR` | нет | `data` | каталог для SQLite и файлов |
 | `LOG_LEVEL` | нет | `INFO` | уровень логирования |

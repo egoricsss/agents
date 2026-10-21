@@ -155,3 +155,42 @@ def test_env_example_contains_no_secret_values() -> None:
     assert secret_fields, "в Settings должны быть секретные поля"
     for key in secret_fields:
         assert pairs[key] == "", f"{key} в .env.example должен быть пустым"
+
+
+def test_telepathy_is_optional(env: pytest.MonkeyPatch) -> None:
+    settings = load()
+
+    assert settings.telepathy_url is None
+    assert settings.telepathy_users == ()
+
+
+def test_telepathy_settings(env: pytest.MonkeyPatch) -> None:
+    env.setenv("TELEPATHY_URL", "http://telepathy:9010")
+    env.setenv("TELEPATHY_SECRET", "shared-secret")
+    env.setenv("TELEPATHY_USERS", "777, 888")
+
+    settings = load()
+
+    assert str(settings.telepathy_url).startswith("http://telepathy:9010")
+    assert settings.telepathy_secret is not None
+    assert "shared-secret" not in repr(settings)
+    assert settings.telepathy_users == (777, 888)
+
+
+def test_telepathy_url_needs_secret(env: pytest.MonkeyPatch) -> None:
+    env.setenv("TELEPATHY_URL", "http://telepathy:9010")
+    env.setenv("TELEPATHY_SECRET", "")
+
+    with pytest.raises(ValidationError, match="TELEPATHY_SECRET"):
+        load()
+
+
+def test_empty_telepathy_values_mean_unset(env: pytest.MonkeyPatch) -> None:
+    env.setenv("TELEPATHY_URL", "")
+    env.setenv("TELEPATHY_SECRET", "")
+    env.setenv("TELEPATHY_USERS", "")
+
+    settings = load()
+
+    assert (settings.telepathy_url, settings.telepathy_secret) == (None, None)
+    assert settings.telepathy_users == ()

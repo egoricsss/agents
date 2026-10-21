@@ -2,11 +2,11 @@
 
 from functools import cached_property
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, FilePath, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AnyHttpUrl, Field, FilePath, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 GigaChatScope = Literal["GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # Корневой сертификат Минцифры (PEM): нужен для TLS к GigaChat.
     gigachat_ca_bundle_file: FilePath | None = None
 
+    # Агент «Телепатия» в соседнем контейнере (пусто — не подключён).
+    telepathy_url: AnyHttpUrl | None = None
+    telepathy_secret: SecretStr | None = None
+    # Гости: Telegram ID, которым доступна только «Телепатия».
+    telepathy_users: Annotated[tuple[int, ...], NoDecode] = ()
+
     tz: str = "Europe/Moscow"
     data_dir: Path = Path("data")
     log_level: LogLevel = "INFO"
@@ -45,10 +51,23 @@ class Settings(BaseSettings):
             raise ValueError("секрет не может быть пустым")
         return value
 
-    @field_validator("gigachat_ca_bundle_file", mode="before")
+    @field_validator("gigachat_ca_bundle_file", "telepathy_url", "telepathy_secret", mode="before")
     @classmethod
-    def _empty_path_is_none(cls, value: object) -> object:
+    def _empty_is_none(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("telepathy_users", mode="before")
+    @classmethod
+    def _comma_separated_ids(cls, value: object) -> object:
+        if isinstance(value, str):
+            return tuple(int(part) for part in value.replace(" ", "").split(",") if part)
+        return value
+
+    @model_validator(mode="after")
+    def _telepathy_needs_secret(self) -> Self:
+        if self.telepathy_url is not None and self.telepathy_secret is None:
+            raise ValueError("для TELEPATHY_URL нужен TELEPATHY_SECRET (общий с telepathy)")
+        return self
 
     @field_validator("yandex_disk_root")
     @classmethod

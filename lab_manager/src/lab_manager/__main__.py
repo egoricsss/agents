@@ -28,6 +28,7 @@ from lab_manager.extraction.llm import LLMExtractor
 from lab_manager.gateway import Gateway
 from lab_manager.llm.gigachat import ChatResult, GigaChatClient
 from lab_manager.llm.pydantic_adapter import gigachat_model
+from lab_manager.remote_agents import remote_agents
 from lab_manager.services.disk_sync import DiskSync
 from lab_manager.services.editing import LabEditor
 from lab_manager.services.executor_prompt import ExecutorPromptBuilder
@@ -134,7 +135,8 @@ async def run(settings: Settings) -> None:
                 db=db, storage=storage, disk=disk, disk_root=settings.yandex_disk_root
             ),
         )
-        gateway = Gateway([agent], owner_id=settings.telegram_owner_id)
+        remote, guests = remote_agents(settings)
+        gateway = Gateway([agent, *remote], owner_id=settings.telegram_owner_id, guests=guests)
         bot = Bot(
             settings.telegram_bot_token.get_secret_value(),
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -148,7 +150,13 @@ async def run(settings: Settings) -> None:
         ]
         try:
             me = await bot.get_me()
-            log.info("bot @%s started, owner %s", me.username, settings.telegram_owner_id)
+            log.info(
+                "bot @%s started, owner %s, agents %s, guests %d",
+                me.username,
+                settings.telegram_owner_id,
+                ", ".join(gateway.agents),
+                len(guests),
+            )
             await bot.delete_webhook(drop_pending_updates=False)
             await gateway.set_commands(bot)
             # start_polling сам ловит SIGINT/SIGTERM и завершается штатно.
@@ -156,6 +164,7 @@ async def run(settings: Settings) -> None:
         finally:
             log.info("shutting down")
             await gateway.drain()
+            await gateway.aclose()
             stop.set()
             await asyncio.gather(*background, return_exceptions=True)
             await bot.session.close()
