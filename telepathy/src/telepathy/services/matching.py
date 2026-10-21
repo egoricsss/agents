@@ -20,13 +20,14 @@ from telepathy.db import Database
 from telepathy.db.models import MatchCheck, Thought
 from telepathy.db.repos import Checks, Matches, Pairs, Thoughts
 from telepathy.services.embeddings import Embedder
-from telepathy.services.errors import NotPairedError
+from telepathy.services.errors import NotPairedError, ThoughtLimitError
 from telepathy.services.judge import Match
 from telepathy.services.scoring import ScoredCandidate, top_candidate
 
 log = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
+HOUR = timedelta(hours=1)
 
 
 def utc_now() -> datetime:
@@ -42,6 +43,7 @@ class MatchingConfig:
     window: timedelta
     tau_hours: float
     threshold: float
+    max_per_hour: int = 30
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Self:
@@ -49,6 +51,7 @@ class MatchingConfig:
             window=timedelta(hours=settings.match_window_hours),
             tau_hours=settings.tau_hours,
             threshold=settings.score_threshold,
+            max_per_hour=settings.max_thoughts_per_hour,
         )
 
 
@@ -115,6 +118,7 @@ class MatchingService:
         self.config = config
         self.clock = clock
         self._locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._user_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def save(self, user_id: int, text: str, at: datetime) -> SavedThought:
         """Сохранить мысль участника полной пары (текст, эмбеддинг, время)."""
@@ -124,11 +128,14 @@ class MatchingService:
             raise NotPairedError
         partner_id = pair.partner_of(user_id)
         assert partner_id is not None  # noqa: S101 — пара полная, проверено выше
-        embedding = await self.embedder.embed(text)
-        async with self.db.session() as session, session.begin():
-            thought = await Thoughts(session).add(
-                user_id=user_id, pair_id=pair.id, text=text, embedding=embedding, at=at
-            )
+        # Замок на человека: проверка лимита и запись не разойдутся при пачке сообщений.
+        async with self._user_locks[user_id]:
+            await self._check_limit(user_id, at)
+            embedding = await self.embedder.embed(text)
+            async with self.db.session() as session, session.begin():
+                thought = await Thoughts(session).add(
+                    user_id=user_id, pair_id=pair.id, text=text, embedding=embedding, at=at
+                )
         log.info("thought %s saved (pair %s)", thought.id, pair.id)
         return SavedThought(
             id=thought.id,
@@ -139,6 +146,15 @@ class MatchingService:
             created_at=at,
             embedding=embedding,
         )
+
+    async def _check_limit(self, user_id: int, at: datetime) -> None:
+        async with self.db.session() as session:
+            recent = await Thoughts(session).by_user_since(user_id, at - HOUR)
+        if len(recent) >= self.config.max_per_hour:
+            # Скользящий час: место освободится, когда самой ранней из них исполнится час.
+            oldest = recent[-self.config.max_per_hour]
+            log.info("user %s hit the hourly limit", user_id)
+            raise ThoughtLimitError(self.config.max_per_hour, oldest + HOUR - at)
 
     async def find_match(self, thought: SavedThought) -> FoundMatch | None:
         async with self._locks[thought.pair_id]:

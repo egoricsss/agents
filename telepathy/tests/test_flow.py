@@ -128,3 +128,25 @@ async def test_allowed_users_only(db: Database) -> None:
     assert app.tg.texts(CARL.id) == []
     assert app.tg.texts(ANYA.id)
     assert await PairingService(db).display_name(CARL.id) == "Партнёр"  # не зарегистрирован
+
+
+async def test_hourly_limit_in_bot(db: Database) -> None:
+    app = make_app(db)
+    await app.pair(ANYA, BORIS)
+    for i in range(30):
+        await app.say(ANYA, f"мысль {i}", at=NOW + timedelta(seconds=i))
+    app.tg.reset()
+
+    await app.say(ANYA, "тридцать первая", at=NOW + timedelta(minutes=5))
+
+    assert app.tg.texts(ANYA.id) != [ACCEPTED]
+    assert "30" in app.tg.last(ANYA.id)
+    assert app.tg.texts(BORIS.id) == []
+
+
+def test_limit_setting() -> None:
+    from telepathy.config import Settings
+    from telepathy.services.matching import MatchingConfig
+
+    settings = Settings(_env_file=None, telegram_bot_token="42:T")  # type: ignore[call-arg]  # noqa: S106
+    assert MatchingConfig.from_settings(settings).max_per_hour == 30

@@ -129,6 +129,15 @@ class Thoughts:
         )
         return result.rowcount  # type: ignore[attr-defined]
 
+    async def by_user_since(self, user_id: int, since: datetime) -> list[datetime]:
+        """Времена мыслей человека с момента `since`, от старых к новым."""
+        query = (
+            select(Thought.created_at)
+            .where(Thought.user_id == user_id, Thought.created_at > since)
+            .order_by(Thought.created_at)
+        )
+        return list(await self.session.scalars(query))
+
     async def recent(self, pair_id: int, limit: int) -> list[Thought]:
         query = (
             select(Thought)

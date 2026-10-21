@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 from telepathy.db import Database
 from telepathy.db.models import Thought, ThoughtMatch
 from telepathy.db.repos import Pairs, Thoughts, Users
-from telepathy.services.errors import NotPairedError
+from telepathy.services.errors import NotPairedError, ThoughtLimitError
 from telepathy.services.matching import MatchingConfig, MatchingService
 from tests.conftest import NOW
 from tests.fakes import FakeEmbedder, ScriptedJudge
@@ -180,3 +180,34 @@ async def test_simultaneous_thoughts_match_once(
     assert sum(result is not None for result in results) == 1
     assert len(judge.calls) == 1
     assert await match_count(db) == 1
+
+
+async def test_hourly_limit_per_user(db: Database, paired: None, embedder: FakeEmbedder) -> None:
+    service = MatchingService(
+        db=db,
+        embedder=embedder,
+        judge=ScriptedJudge(),
+        config=MatchingConfig(
+            window=timedelta(hours=24), tau_hours=24, threshold=0.75, max_per_hour=3
+        ),
+        clock=lambda: NOW,
+    )
+    for minutes in (0, 10, 20):
+        await service.save(ME, f"мысль {minutes}", NOW + timedelta(minutes=minutes))
+    # партнёра лимит не касается
+    await service.save(PARTNER, "моя мысль", NOW + timedelta(minutes=30))
+
+    with pytest.raises(ThoughtLimitError) as error:
+        await service.save(ME, "четвёртая", NOW + timedelta(minutes=30))
+
+    assert error.value.retry_after == timedelta(minutes=30)  # освободится через час после первой
+    assert "3" in str(error.value)
+    assert "30 мин" in str(error.value)
+    assert embedder.calls.count("четвёртая") == 0  # лишняя мысль даже не считается моделью
+
+    # скользящее окно: через час после первой мысли можно снова
+    await service.save(ME, "уже можно", NOW + timedelta(hours=1))
+
+
+async def test_default_limit_is_30_per_hour() -> None:
+    assert CONFIG.max_per_hour == 30

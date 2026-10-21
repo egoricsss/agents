@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     match_window_hours: float = Field(24.0, gt=0)
     tau_hours: float = Field(24.0, gt=0)
     score_threshold: float = Field(0.75, ge=0, le=1)
+    # Не больше стольких мыслей от одного человека за скользящий час.
+    max_thoughts_per_hour: int = Field(30, ge=1)
 
     tz: str = "Europe/Moscow"
     data_dir: Path = Path("data")
