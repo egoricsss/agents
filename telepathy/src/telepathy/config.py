@@ -4,13 +4,14 @@ from pathlib import Path
 from typing import Annotated, Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, FilePath, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 # polling — самостоятельный бот со своим токеном;
 # gateway — апдейты присылает общий шлюз (lab_manager) по внутренней docker-сети.
 TelegramMode = Literal["polling", "gateway"]
+GigaChatScope = Literal["GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP"]
 
 
 class Settings(BaseSettings):
@@ -36,6 +37,12 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr | None = None
     llm_base_url: str | None = None
     llm_timeout_seconds: float = Field(30.0, gt=0)
+    # GigaChat: основной судья (LLM_MODEL=gigachat:<модель>) или запасной при сбое основного.
+    gigachat_credentials: SecretStr | None = None
+    gigachat_scope: GigaChatScope = "GIGACHAT_API_PERS"
+    gigachat_model: str = "GigaChat-2"
+    # Корневой сертификат Минцифры (PEM): нужен для TLS к GigaChat.
+    gigachat_ca_bundle_file: FilePath | None = None
 
     embedding_model: str = "intfloat/multilingual-e5-small"
     embedding_threads: int = Field(1, ge=1)
@@ -55,7 +62,14 @@ class Settings(BaseSettings):
             raise ValueError("секрет не может быть пустым")
         return value
 
-    @field_validator("llm_api_key", "gateway_secret", "llm_base_url", mode="before")
+    @field_validator(
+        "llm_api_key",
+        "gateway_secret",
+        "llm_base_url",
+        "gigachat_credentials",
+        "gigachat_ca_bundle_file",
+        mode="before",
+    )
     @classmethod
     def _blank_is_none(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():

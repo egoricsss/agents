@@ -11,7 +11,8 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 
-from telepathy.services.judge import Judge, Match, build_model, create_judge, judge_agent
+from telepathy.config import Settings
+from telepathy.services.judge import Judge, Match, build_model, judge_agent, judge_from_settings
 
 SAME = {"is_same": True, "common_idea": "пицца", "message": "🍕 Вы оба захотели пиццу!"}
 
@@ -117,7 +118,10 @@ async def test_misconfigured_llm_disables_judge_instead_of_crashing(
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
     with caplog.at_level(logging.ERROR, logger="telepathy"):
-        judge = create_judge("deepseek:deepseek-chat", api_key=None)
+        judge = judge_from_settings(
+            Settings(_env_file=None, telegram_bot_token="42:T"),  # type: ignore[call-arg]  # noqa: S106
+            gigachat=None,
+        )
 
     assert await judge.compare("хочу пиццу", "пиццу бы") is None
     assert any("LLM_API_KEY" in r.getMessage() for r in caplog.records)

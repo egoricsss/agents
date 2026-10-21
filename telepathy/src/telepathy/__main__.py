@@ -27,8 +27,9 @@ from telepathy.bot.gateway import serve_gateway
 from telepathy.config import Settings
 from telepathy.db import Database
 from telepathy.health import HEARTBEAT_FILE
+from telepathy.llm.gigachat import GigaChatClient
 from telepathy.services.embeddings import SentenceEmbedder
-from telepathy.services.judge import create_judge
+from telepathy.services.judge import gigachat_model_name, judge_from_settings
 from telepathy.services.matching import MatchingConfig, MatchingService
 from telepathy.services.pairing import PairingService
 from telepathy.services.stats import StatsService
@@ -67,6 +68,7 @@ async def run(settings: Settings) -> None:
     )
     stop = asyncio.Event()
     beat = asyncio.create_task(heartbeat(settings.data_dir / HEARTBEAT_FILE, stop))
+    gigachat: GigaChatClient | None = None
     try:
         # Модель грузится один раз, до приёма сообщений; цикл событий при этом свободен.
         embedder = await SentenceEmbedder.load(
@@ -74,12 +76,15 @@ async def run(settings: Settings) -> None:
             threads=settings.embedding_threads,
             cache_folder=settings.data_dir / "models",
         )
-        judge = create_judge(
-            settings.llm_model,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            timeout=settings.llm_timeout_seconds,
-        )
+        if settings.gigachat_credentials is not None:
+            gigachat = GigaChatClient(
+                settings.gigachat_credentials,
+                scope=settings.gigachat_scope,
+                model=gigachat_model_name(settings),
+                ca_bundle=settings.gigachat_ca_bundle_file,
+                timeout=settings.llm_timeout_seconds,
+            )
+        judge = judge_from_settings(settings, gigachat=gigachat)
         dp = create_dispatcher(
             pairing=PairingService(db),
             matching=MatchingService(
@@ -121,6 +126,8 @@ async def run(settings: Settings) -> None:
         stop.set()
         await asyncio.gather(beat, return_exceptions=True)
         await bot.session.close()
+        if gigachat is not None:
+            await gigachat.aclose()
         await db.close()
 
 

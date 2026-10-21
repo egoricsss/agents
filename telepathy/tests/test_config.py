@@ -78,5 +78,5 @@ def test_env_example_documents_every_setting() -> None:
 
 def test_env_example_has_no_secret_values() -> None:
     pairs = _env_example()
-    for key in ("TELEGRAM_BOT_TOKEN", "LLM_API_KEY", "GATEWAY_SECRET"):
+    for key in ("TELEGRAM_BOT_TOKEN", "LLM_API_KEY", "GATEWAY_SECRET", "GIGACHAT_CREDENTIALS"):
         assert pairs[key] == ""

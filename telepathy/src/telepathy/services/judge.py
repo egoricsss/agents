@@ -12,7 +12,12 @@ from typing import Any
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.models import Model, infer_model
+from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.providers import Provider, infer_provider_class
+
+from telepathy.config import Settings
+from telepathy.llm.gigachat import GigaChatClient
+from telepathy.llm.pydantic_adapter import gigachat_model
 
 log = logging.getLogger(__name__)
 
@@ -102,21 +107,45 @@ class DisabledJudge:
         return None
 
 
-def create_judge(
-    model: str,
-    *,
-    api_key: SecretStr | None = None,
-    base_url: str | None = None,
-    timeout: float = 30.0,
+GIGACHAT_PROVIDER = "gigachat"
+
+
+def gigachat_model_name(settings: Settings) -> str:
+    provider, _, name = settings.llm_model.partition(":")
+    return name if provider == GIGACHAT_PROVIDER else settings.gigachat_model
+
+
+def judge_from_settings(
+    settings: Settings, *, gigachat: GigaChatClient | None
 ) -> Judge | DisabledJudge:
-    """Судья по настройкам; ошибка конфигурации LLM не должна ронять бота."""
-    try:
-        return Judge(build_model(model, api_key=api_key, base_url=base_url), timeout=timeout)
-    except Exception as exc:
-        log.error(
-            "LLM judge %s is not configured (check LLM_API_KEY / LLM_MODEL): %s: %s",
-            model,
-            type(exc).__name__,
-            exc,
-        )
+    """Судья по настройкам. GigaChat — основной (LLM_MODEL=gigachat:…) или запасной.
+
+    Ошибка конфигурации LLM не роняет бота: без единой модели судья отключается.
+    """
+    models: list[Model] = []
+    if not settings.llm_model.startswith(f"{GIGACHAT_PROVIDER}:"):
+        try:
+            models.append(
+                build_model(
+                    settings.llm_model,
+                    api_key=settings.llm_api_key,
+                    base_url=settings.llm_base_url,
+                )
+            )
+        except Exception as exc:
+            log.error(
+                "LLM %s is not configured (check LLM_API_KEY / LLM_MODEL): %s: %s",
+                settings.llm_model,
+                type(exc).__name__,
+                exc,
+            )
+    if gigachat is not None:
+        models.append(gigachat_model(gigachat, temperature=0.3))
+    elif settings.llm_model.startswith(f"{GIGACHAT_PROVIDER}:"):
+        log.error("LLM %s needs GIGACHAT_CREDENTIALS", settings.llm_model)
+    if not models:
         return DisabledJudge()
+    # Любая ошибка основной модели (сеть, ключ, лимиты) — повод спросить запасную.
+    model = models[0] if len(models) == 1 else FallbackModel(*models, fallback_on=(Exception,))
+    log.info("judge models: %s", ", ".join(m.model_name for m in models))
+    return Judge(model, timeout=settings.llm_timeout_seconds)
