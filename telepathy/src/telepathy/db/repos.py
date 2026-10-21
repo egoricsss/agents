@@ -76,7 +76,7 @@ class Pairs:
         result = await self.session.execute(
             update(Pair)
             .where(Pair.id == pair.id, Pair.user_b_id.is_(None))
-            .values(user_b_id=user_b_id, invite_code=None, joined_at=now)
+            .values(user_b_id=user_b_id, joined_at=now)
         )
         await self.session.refresh(pair)
         return result.rowcount == 1  # type: ignore[attr-defined]

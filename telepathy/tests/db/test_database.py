@@ -69,7 +69,6 @@ async def test_second_seat_taken_once(db: Database) -> None:
         assert await Pairs(session).join(pair, 3, NOW) is False
 
         assert pair.user_b_id == 2
-        assert pair.invite_code is None
         assert pair.partner_of(1) == 2
         assert pair.partner_of(2) == 1
 
