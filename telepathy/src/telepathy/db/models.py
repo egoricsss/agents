@@ -88,3 +88,25 @@ class ThoughtMatch(Base):
     delta_seconds: Mapped[float] = mapped_column(Float)
     common_idea: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime]
+
+
+class MatchCheck(Base):
+    """Журнал поиска совпадения для каждой мысли — для отладки порогов и судьи.
+
+    `outcome`: no_candidates | below_threshold | judge_unavailable | judge_rejected | matched.
+    Лучший кандидат записывается и когда он не прошёл порог — так видно, насколько не хватило.
+    """
+
+    __tablename__ = "match_checks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pair_id: Mapped[int] = mapped_column(ForeignKey("pairs.id"), index=True)
+    thought_id: Mapped[int] = mapped_column(ForeignKey("thoughts.id"), index=True)
+    candidate_id: Mapped[int | None] = mapped_column(ForeignKey("thoughts.id"))
+    candidates: Mapped[int]
+    cosine: Mapped[float | None] = mapped_column(Float)
+    score: Mapped[float | None] = mapped_column(Float)
+    delta_seconds: Mapped[float | None] = mapped_column(Float)
+    threshold: Mapped[float] = mapped_column(Float)
+    outcome: Mapped[str] = mapped_column(String(32))
+    checked_at: Mapped[datetime]

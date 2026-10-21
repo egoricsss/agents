@@ -11,6 +11,7 @@ from aiogram.types import User
 
 from telepathy.bot import create_dispatcher
 from telepathy.db import Database
+from telepathy.services.debug import DebugService
 from telepathy.services.matching import MatchingConfig, MatchingService
 from telepathy.services.pairing import PairingService
 from telepathy.services.stats import StatsService
@@ -56,6 +57,7 @@ def make_app(db: Database, *, allowed: tuple[int, ...] = ()) -> App:
         pairing=PairingService(db, clock=lambda: NOW),
         matching=matching,
         stats=StatsService(db),
+        debug=DebugService(db),
         allowed_user_ids=allowed,
     )
     bot = Bot(BOT_TOKEN, session=tg, default=DefaultBotProperties(parse_mode=ParseMode.HTML))

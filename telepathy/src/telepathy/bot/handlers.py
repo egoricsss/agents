@@ -6,6 +6,7 @@
 import logging
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -13,6 +14,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BotCommand, Message, TelegramObject
 
 from telepathy.bot import texts
+from telepathy.services.debug import DebugService
 from telepathy.services.errors import TelepathyError
 from telepathy.services.matching import FoundMatch, MatchingService
 from telepathy.services.pairing import PairingService
@@ -21,6 +23,32 @@ from telepathy.services.stats import StatsService
 log = logging.getLogger(__name__)
 
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
+DEFAULT_ZONE = ZoneInfo("Europe/Moscow")
+DEBUG_DEFAULT_LIMIT = 10
+DEBUG_MAX_LIMIT = 30
+MESSAGE_LIMIT = 4000  # Telegram режет на 4096 символах
+
+
+def _limit(command: CommandObject) -> int:
+    try:
+        value = int((command.args or "").strip())
+    except ValueError:
+        return DEBUG_DEFAULT_LIMIT
+    return max(1, min(value, DEBUG_MAX_LIMIT))
+
+
+async def _answer_long(message: Message, text: str) -> None:
+    """Длинный текст — несколькими сообщениями, по границам строк."""
+    chunk: list[str] = []
+    size = 0
+    for line in text.split("\n"):
+        if chunk and size + len(line) + 1 > MESSAGE_LIMIT:
+            await message.answer("\n".join(chunk))
+            chunk, size = [], 0
+        chunk.append(line)
+        size += len(line) + 1
+    if chunk:
+        await message.answer("\n".join(chunk))
 
 
 class UserGate(BaseMiddleware):
@@ -104,6 +132,31 @@ def create_router() -> Router:
             return
         await message.answer(texts.stats(value))
 
+    @router.message(Command("thoughts", "debug", "matches"))
+    async def debug(
+        message: Message,
+        command: CommandObject,
+        debug: DebugService,
+        pairing: PairingService,
+        zone: ZoneInfo,
+    ) -> None:
+        assert message.from_user is not None  # noqa: S101
+        user_id = message.from_user.id
+        limit = _limit(command)
+        try:
+            status = await pairing.status(user_id)
+            partner = await pairing.display_name(status.partner_id) if status.partner_id else ""
+            if command.command == "thoughts":
+                text = texts.debug_thoughts(await debug.thoughts(user_id, limit), partner, zone)
+            elif command.command == "debug":
+                text = texts.debug_checks(await debug.checks(user_id, limit), partner, zone)
+            else:
+                text = texts.debug_matches(await debug.matches(user_id, limit), partner, zone)
+        except TelepathyError as exc:
+            await message.answer(str(exc))
+            return
+        await _answer_long(message, text)
+
     @router.message(F.text.startswith("/"))
     async def unknown_command(message: Message) -> None:
         await message.answer(texts.UNKNOWN_COMMAND)
@@ -136,9 +189,11 @@ def create_dispatcher(
     pairing: PairingService,
     matching: MatchingService,
     stats: StatsService,
+    debug: DebugService,
     allowed_user_ids: Iterable[int] = (),
+    zone: ZoneInfo = DEFAULT_ZONE,
 ) -> Dispatcher:
-    dp = Dispatcher(pairing=pairing, matching=matching, stats=stats)
+    dp = Dispatcher(pairing=pairing, matching=matching, stats=stats, debug=debug, zone=zone)
     dp.message.outer_middleware(UserGate(allowed_user_ids))
     dp.include_router(create_router())
     return dp

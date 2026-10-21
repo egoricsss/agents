@@ -8,7 +8,7 @@ import numpy as np
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from telepathy.db.models import Pair, Thought, ThoughtMatch, User
+from telepathy.db.models import MatchCheck, Pair, Thought, ThoughtMatch, User
 
 
 def to_blob(vector: np.ndarray) -> bytes:
@@ -129,6 +129,21 @@ class Thoughts:
         )
         return result.rowcount  # type: ignore[attr-defined]
 
+    async def recent(self, pair_id: int, limit: int) -> list[Thought]:
+        query = (
+            select(Thought)
+            .where(Thought.pair_id == pair_id)
+            .order_by(Thought.created_at.desc(), Thought.id.desc())
+            .limit(limit)
+        )
+        return list(await self.session.scalars(query))
+
+    async def by_ids(self, ids: Sequence[int]) -> dict[int, Thought]:
+        if not ids:
+            return {}
+        rows = await self.session.scalars(select(Thought).where(Thought.id.in_(ids)))
+        return {thought.id: thought for thought in rows}
+
     async def counts_since(self, pair_id: int, since: datetime) -> ThoughtCounts:
         query = select(func.count(Thought.id), func.count(Thought.matched_at)).where(
             Thought.pair_id == pair_id, Thought.created_at >= since
@@ -165,9 +180,36 @@ class Matches:
         await self.session.flush()
         return match
 
+    async def recent(self, pair_id: int, limit: int) -> list[ThoughtMatch]:
+        query = (
+            select(ThoughtMatch)
+            .where(ThoughtMatch.pair_id == pair_id)
+            .order_by(ThoughtMatch.id.desc())
+            .limit(limit)
+        )
+        return list(await self.session.scalars(query))
+
     async def summary(self, pair_id: int) -> MatchSummary:
         query = select(func.count(ThoughtMatch.id), func.min(ThoughtMatch.delta_seconds)).where(
             ThoughtMatch.pair_id == pair_id
         )
         count, fastest = (await self.session.execute(query)).one()
         return MatchSummary(count=count, fastest_seconds=fastest)
+
+
+class Checks:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def add(self, check: MatchCheck) -> None:
+        self.session.add(check)
+        await self.session.flush()
+
+    async def recent(self, pair_id: int, limit: int) -> list[MatchCheck]:
+        query = (
+            select(MatchCheck)
+            .where(MatchCheck.pair_id == pair_id)
+            .order_by(MatchCheck.id.desc())
+            .limit(limit)
+        )
+        return list(await self.session.scalars(query))

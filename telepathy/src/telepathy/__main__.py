@@ -28,6 +28,7 @@ from telepathy.config import Settings
 from telepathy.db import Database
 from telepathy.health import HEARTBEAT_FILE
 from telepathy.llm.gigachat import GigaChatClient
+from telepathy.services.debug import DebugService
 from telepathy.services.embeddings import OnnxEmbedder
 from telepathy.services.judge import gigachat_model_name, judge_from_settings
 from telepathy.services.matching import MatchingConfig, MatchingService
@@ -95,7 +96,9 @@ async def run(settings: Settings) -> None:
                 config=MatchingConfig.from_settings(settings),
             ),
             stats=StatsService(db),
+            debug=DebugService(db),
             allowed_user_ids=settings.allowed_user_ids,
+            zone=settings.zone,
         )
         me = await bot.get_me()
         log.info(

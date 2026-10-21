@@ -17,12 +17,12 @@ import numpy as np
 
 from telepathy.config import Settings
 from telepathy.db import Database
-from telepathy.db.models import Thought
-from telepathy.db.repos import Matches, Pairs, Thoughts
+from telepathy.db.models import MatchCheck, Thought
+from telepathy.db.repos import Checks, Matches, Pairs, Thoughts
 from telepathy.services.embeddings import Embedder
 from telepathy.services.errors import NotPairedError
 from telepathy.services.judge import Match
-from telepathy.services.scoring import best_candidate
+from telepathy.services.scoring import ScoredCandidate, top_candidate
 
 log = logging.getLogger(__name__)
 
@@ -156,14 +156,11 @@ class MatchingService:
                 embedding=thought.embedding,
                 since=thought.created_at - self.config.window,
             )
-        best = best_candidate(
-            candidates,
-            at=thought.created_at,
-            tau_hours=self.config.tau_hours,
-            threshold=self.config.threshold,
-        )
-        if best is None:
+        best = top_candidate(candidates, at=thought.created_at, tau_hours=self.config.tau_hours)
+        if best is None or best.score < self.config.threshold:
             log.info("thought %s: no candidate of %d passed threshold", thought.id, len(candidates))
+            outcome = "no_candidates" if best is None else "below_threshold"
+            await self._record(thought, best, len(candidates), outcome)
             return None
 
         async with self.db.session() as session:
@@ -175,6 +172,8 @@ class MatchingService:
         )
         verdict = await self.judge.compare(earlier.text, later.text)
         if verdict is None or not verdict.is_same:
+            outcome = "judge_unavailable" if verdict is None else "judge_rejected"
+            await self._record(thought, best, len(candidates), outcome)
             return None
 
         async with self.db.session() as session:
@@ -191,6 +190,7 @@ class MatchingService:
                 common_idea=verdict.common_idea,
                 at=self.clock(),
             )
+            await Checks(session).add(self._check(thought, best, len(candidates), "matched"))
             await session.commit()
         log.info("match %s in pair %s (Δt=%s)", match.id, thought.pair_id, best.delta)
         return FoundMatch(
@@ -203,3 +203,25 @@ class MatchingService:
             earlier=earlier,
             later=later,
         )
+
+    def _check(
+        self, thought: SavedThought, best: ScoredCandidate | None, count: int, outcome: str
+    ) -> MatchCheck:
+        return MatchCheck(
+            pair_id=thought.pair_id,
+            thought_id=thought.id,
+            candidate_id=best.candidate.thought_id if best else None,
+            candidates=count,
+            cosine=best.candidate.cosine if best else None,
+            score=best.score if best else None,
+            delta_seconds=best.delta.total_seconds() if best else None,
+            threshold=self.config.threshold,
+            outcome=outcome,
+            checked_at=self.clock(),
+        )
+
+    async def _record(
+        self, thought: SavedThought, best: ScoredCandidate | None, count: int, outcome: str
+    ) -> None:
+        async with self.db.session() as session, session.begin():
+            await Checks(session).add(self._check(thought, best, count, outcome))
