@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -57,3 +59,24 @@ def test_invalid_values_rejected(env: dict[str, str]) -> None:
 def test_gateway_mode_with_secret() -> None:
     settings = make(telegram_mode="gateway", gateway_secret="s3cret")  # noqa: S106
     assert settings.gateway_secret is not None
+
+
+def _env_example() -> dict[str, str]:
+    path = Path(__file__).resolve().parents[1] / ".env.example"
+    pairs = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line and not line.startswith("#"):
+            key, _, value = line.partition("=")
+            pairs[key] = value
+    return pairs
+
+
+def test_env_example_documents_every_setting() -> None:
+    assert set(_env_example()) == {name.upper() for name in Settings.model_fields}
+
+
+def test_env_example_has_no_secret_values() -> None:
+    pairs = _env_example()
+    for key in ("TELEGRAM_BOT_TOKEN", "LLM_API_KEY", "GATEWAY_SECRET"):
+        assert pairs[key] == ""

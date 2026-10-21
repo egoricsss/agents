@@ -1,0 +1,48 @@
+# Запуск: docker compose up -d --build   (из папки проекта, rootless Docker)
+# Портов наружу нет: в режиме polling бот сам опрашивает Telegram, в режиме gateway
+# шлюз lab_manager шлёт апдейты на telepathy:9010 внутри docker-сети «agents».
+
+services:
+  telepathy:
+    build: .
+    image: telepathy:latest
+    container_name: telepathy
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    volumes:
+      - telepathy_data:/data
+    networks:
+      - agents
+    # Модель e5-small в fp32 + torch ≈ 0.8 ГБ RSS. Лимит — чтобы при перерасходе
+    # OOM убил только этот контейнер, а не lab_manager.
+    mem_limit: 1g
+    cpus: 0.75
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-m", "telepathy.health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      # Первый запуск скачивает модель (~470 МБ).
+      start_period: 300s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  telepathy_data:
+
+networks:
+  # Общая сеть агентов: lab_manager подключается к ней как к external.
+  agents:
+    name: agents
