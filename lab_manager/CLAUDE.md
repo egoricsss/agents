@@ -67,6 +67,8 @@
 - Чтение чужих домашних папок и `/root`.
 - Изменение файрвола, SSH и настроек VPN.
 - Сканирование сети и подключение к сторонним серверам, кроме Telegram API, Яндекс API, GigaChat API (`ngw.devices.sberbank.ru`, `gigachat.devices.sberbank.ru`), PyPI, GitHub и Docker Hub.
+  С 2026-10-21 владелец разрешил также: `huggingface.co` (модели эмбеддингов), `api.deepseek.com`
+  (LLM-судья telepathy) и `download.pytorch.org` (CPU-сборка torch).
 - Удаление данных вне `~/projects`.
 
 ## Порядок работы
